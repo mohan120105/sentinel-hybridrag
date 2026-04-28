@@ -187,7 +187,8 @@ def retrieve_active_policy(
 
     Business logic:
     - Semantic candidate generation via Neo4j vector index on Policy.embedding.
-    - Strict governance filter is enforced with `WHERE NOT ()-[:SUPERSEDES]->(p)`.
+        - Strict governance filter excludes superseded nodes without hard-binding
+            the SUPERSEDES relationship type in the pattern.
     - Returns evidence-ready context (rule, document name, category).
 
     Args:
@@ -223,8 +224,12 @@ def retrieve_active_policy(
     // 2. Governance Firewall
     // Strictly exclude superseded nodes so only active policy truth flows
     // into generation and downstream compliance decisions.
-        OPTIONAL MATCH (p)-[:BELONGS_TO]->(c:Category)
-    WHERE NOT ()-[:SUPERSEDES]->(p)
+    OPTIONAL MATCH (superseder)-[supersedes_rel]->(p)
+    WHERE type(supersedes_rel) = 'SUPERSEDES'
+    WITH p, combined_score, count(supersedes_rel) AS supersedes_count
+    WHERE supersedes_count = 0
+
+    OPTIONAL MATCH (p)-[:BELONGS_TO]->(c:Category)
 
     // 3. Multi-Hop Extraction
     OPTIONAL MATCH (p)-[:APPLIES_TO]->(ct:CustomerType)
@@ -244,8 +249,12 @@ def retrieve_active_policy(
     vector_only_query = """
     CALL db.index.vector.queryNodes('policy_embeddings', $top_k, $question_embedding)
     YIELD node AS p, score
-OPTIONAL MATCH (p)-[:BELONGS_TO]->(c:Category)
-    WHERE NOT ()-[:SUPERSEDES]->(p)
+    OPTIONAL MATCH (superseder)-[supersedes_rel]->(p)
+    WHERE type(supersedes_rel) = 'SUPERSEDES'
+    WITH p, score, count(supersedes_rel) AS supersedes_count
+    WHERE supersedes_count = 0
+
+    OPTIONAL MATCH (p)-[:BELONGS_TO]->(c:Category)
     OPTIONAL MATCH (p)-[:APPLIES_TO]->(ct:CustomerType)
     OPTIONAL MATCH (p)-[:REQUIRES]->(dr:DocumentRequirement)
     WITH p, c, score, collect(DISTINCT ct.name) AS customer_types, collect(DISTINCT dr.name) AS required_docs
