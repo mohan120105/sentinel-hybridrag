@@ -4,11 +4,11 @@ from neo4j import GraphDatabase, Driver
 def build_neo4j_driver() -> Driver:
     """Create Neo4j driver from environment configuration."""
     uri = os.getenv("NEO4J_URI")
-    user = os.getenv("NEO4J_USERNAME")
+    user = os.getenv("NEO4J_USER") or os.getenv("NEO4J_USERNAME")
     password = os.getenv("NEO4J_PASSWORD")
 
     if not uri or not user or not password:
-        raise ValueError("NEO4J_URI, NEO4J_USERNAME, and NEO4J_PASSWORD must be set.")
+        raise ValueError("NEO4J_URI, NEO4J_USER/NEO4J_USERNAME, and NEO4J_PASSWORD must be set.")
     
     return GraphDatabase.driver(uri, auth=(user.strip(), password.strip()))
 

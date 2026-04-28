@@ -313,7 +313,7 @@ def build_neo4j_driver() -> Driver:
     password = os.getenv("NEO4J_PASSWORD")
 
     if not uri or not user or not password:
-        raise ValueError("NEO4J_URI, NEO4J_USERNAME, and NEO4J_PASSWORD must be set.")
+        raise ValueError("NEO4J_URI, NEO4J_USER/NEO4J_USERNAME, and NEO4J_PASSWORD must be set.")
 
     return GraphDatabase.driver(uri, auth=(user.strip(), password.strip()))
 

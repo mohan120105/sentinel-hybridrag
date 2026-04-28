@@ -458,10 +458,8 @@ def main() -> None:
         driver = build_neo4j_driver()
     except ServiceUnavailable as error:
         print("Neo4j is not reachable. Start Neo4j and confirm Bolt is enabled.")
-        print(
-            "Expected endpoint: "
-            f"{os.getenv('NEO4J_URI', 'bolt://127.0.0.1:7687')}"
-        )
+        expected_endpoint = os.getenv("NEO4J_URI") or "<unset>"
+        print(f"Expected endpoint: {expected_endpoint}")
         print(f"Connection error: {error}")
         return
     except Neo4jError as error:
