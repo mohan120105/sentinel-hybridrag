@@ -342,10 +342,10 @@ def _fetch_session_messages_tx(
         MATCH (s:Session {id: $session_id})-[:CONTAINS_MESSAGE]->(m)
         WHERE 'Message' IN labels(m)
         RETURN
-            m.role AS role,
-            m.content AS content,
-            m.enhanced_prompt AS enhanced_prompt,
-            m.timestamp AS timestamp,
+            properties(m)['role'] AS role,
+            properties(m)['content'] AS content,
+            properties(m)['enhanced_prompt'] AS enhanced_prompt,
+            properties(m)['timestamp'] AS timestamp,
             properties(m)['citations'] AS citations
         ORDER BY m.timestamp ASC
         """,
