@@ -223,7 +223,7 @@ def retrieve_active_policy(
     // 2. Governance Firewall
     // Strictly exclude superseded nodes so only active policy truth flows
     // into generation and downstream compliance decisions.
-    MATCH (p)-[:BELONGS_TO]->(c:Category)
+        OPTIONAL MATCH (p)-[:BELONGS_TO]->(c:Category)
     WHERE NOT ()-[:SUPERSEDES]->(p)
 
     // 3. Multi-Hop Extraction
@@ -231,7 +231,7 @@ def retrieve_active_policy(
     OPTIONAL MATCH (p)-[:REQUIRES]->(dr:DocumentRequirement)
     WITH p, c, combined_score, collect(DISTINCT ct.name) AS customer_types, collect(DISTINCT dr.name) AS required_docs
     RETURN p.name AS document_name,
-           c.name AS category,
+           coalesce(c.name, "General") AS category,
            coalesce(p.extracted_rule, "") AS extracted_rule,
            coalesce(p.source_text, "") AS source_text,
            customer_types,
@@ -244,13 +244,13 @@ def retrieve_active_policy(
     vector_only_query = """
     CALL db.index.vector.queryNodes('policy_embeddings', $top_k, $question_embedding)
     YIELD node AS p, score
-    MATCH (p)-[:BELONGS_TO]->(c:Category)
+OPTIONAL MATCH (p)-[:BELONGS_TO]->(c:Category)
     WHERE NOT ()-[:SUPERSEDES]->(p)
     OPTIONAL MATCH (p)-[:APPLIES_TO]->(ct:CustomerType)
     OPTIONAL MATCH (p)-[:REQUIRES]->(dr:DocumentRequirement)
     WITH p, c, score, collect(DISTINCT ct.name) AS customer_types, collect(DISTINCT dr.name) AS required_docs
     RETURN p.name AS document_name,
-           c.name AS category,
+           coalesce(c.name, "General") AS category,
            coalesce(p.extracted_rule, "") AS extracted_rule,
            coalesce(p.source_text, "") AS source_text,
            customer_types,
