@@ -28,7 +28,7 @@ from dotenv import find_dotenv, load_dotenv
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
-from init_graph import GraphAction
+from init_graph import CATEGORY_VALUES, GraphAction
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from neo4j import Driver, ManagedTransaction
 from neo4j.exceptions import Neo4jError, ServiceUnavailable
@@ -429,12 +429,12 @@ _UPLOAD_PROMPT = (
     "you must include the entire table formatted as Markdown inside the "
     "'extracted_rule' string. Do not summarize away the numbers. "
     "Determine which fixed category it belongs to "
-    "(Retail_Loans, Corporate_Banking, KYC_AML, Credit_Cards, Tax_Compliance). "
+    f"({', '.join(CATEGORY_VALUES)}). "
     "Determine if it is a CREATE_NEW policy or if it SUPERSEDE_OLD policies. "
     "Return strictly in JSON format matching the schema.\n\n"
     "Use ONLY this JSON schema with exact keys:\n"
     "{\n"
-    '  "target_node": "Retail_Loans|Corporate_Banking|KYC_AML|Credit_Cards|Tax_Compliance",\n'
+    f'  "target_node": "{"|".join(CATEGORY_VALUES)}",\n'
     '  "action_type": "CREATE_NEW|SUPERSEDE_OLD",\n'
     '  "extracted_rule": "string",\n'
     '  "superseded_document": "string or null",\n'

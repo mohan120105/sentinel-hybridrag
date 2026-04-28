@@ -165,6 +165,27 @@ def create_policy_vector_index(driver: Driver, embedding_dimensions: int) -> Non
         raise
 
 
+def create_policy_fulltext_index(driver: Driver) -> None:
+    """Create Neo4j full-text index for keyword-backed hybrid retrieval."""
+
+    create_index_query = """
+    CREATE FULLTEXT INDEX policy_keywords IF NOT EXISTS
+    FOR (n:Policy)
+    ON EACH [n.name, n.extracted_rule, n.source_text]
+    """
+
+    try:
+        with driver.session() as session:
+            session.execute_write(lambda tx: tx.run(create_index_query).consume())
+        print("Full-text index ready: policy_keywords (name, extracted_rule, source_text).")
+    except ServiceUnavailable as error:
+        print(f"Neo4j connection dropped while creating full-text index: {error}")
+        raise
+    except Neo4jError as error:
+        print(f"Neo4j error while creating full-text index: {error}")
+        raise
+
+
 def get_mock_documents() -> List[Dict[str, str]]:
     """Return synthetic banking compliance memos for ingestion tests.
 
@@ -173,6 +194,34 @@ def get_mock_documents() -> List[Dict[str, str]]:
     """
 
     return [
+        {
+            "name": "AML_2024_PAN_Limit_Memo",
+            "issue_date": "2024-04-15",
+            "text": (
+                "For cash deposits above INR 100,000 in a single day, customers must "
+                "provide PAN or Form 60. Branch staff must retain transaction logs for "
+                "audit review and escalate repeated threshold breaches to AML compliance."
+            ),
+        },
+        {
+            "name": "AML_2026_Urgent_Update",
+            "issue_date": "2026-01-10",
+            "text": (
+                "This urgent circular supersedes AML_2024_PAN_Limit_Memo. For cash "
+                "deposits above INR 50,000, PAN verification is mandatory. Branch staff "
+                "must capture customer segment details and retain supporting identity "
+                "documents for monitoring and reporting."
+            ),
+        },
+        {
+            "name": "Retail_NRI_Home_Loan_Policy",
+            "issue_date": "2025-08-01",
+            "text": (
+                "NRI home loan applications require passport copy, overseas address proof, "
+                "and salary slips. The interest rate starts at 8.35% p.a. with a maximum "
+                "loan amount of INR 20,000,000 subject to credit approval."
+            ),
+        },
     ]
 
 
@@ -357,6 +406,7 @@ def main() -> None:
         embedding_dimensions = len(embeddings_model.embed_query("dimension_probe"))
         initialize_ontology(driver)
         create_policy_vector_index(driver, embedding_dimensions)
+        create_policy_fulltext_index(driver)
         documents = get_mock_documents()
         process_and_ingest(driver, llm, embeddings_model, documents)
     finally:
