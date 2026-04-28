@@ -346,7 +346,7 @@ def _fetch_session_messages_tx(
             m.content AS content,
             m.enhanced_prompt AS enhanced_prompt,
             m.timestamp AS timestamp,
-            m.citations AS citations
+            properties(m)['citations'] AS citations
         ORDER BY m.timestamp ASC
         """,
         session_id=session_id,
