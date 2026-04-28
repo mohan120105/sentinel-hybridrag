@@ -459,6 +459,8 @@ export default function App() {
 
   const messagesEndRef = useRef(null)
   const inputRef = useRef(null)
+  const chatControllerRef = useRef(null)
+  const enhanceControllerRef = useRef(null)
 
   // Keeps the most recent evidence-bearing response in view to reduce operator
   // miss risk during rapid multi-turn investigations.
@@ -526,6 +528,18 @@ export default function App() {
 
   /** Switch to a different session from the sidebar. */
   const handleSelectSession = useCallback((sessionId) => {
+    // Cancel any in-flight requests when switching sessions
+    if (chatControllerRef.current) {
+      try { chatControllerRef.current.abort() } catch (e) {}
+      chatControllerRef.current = null
+      setIsLoading(false)
+    }
+    if (enhanceControllerRef.current) {
+      try { enhanceControllerRef.current.abort() } catch (e) {}
+      enhanceControllerRef.current = null
+      setIsEnhancing(false)
+    }
+
     setCurrentSession(sessionId)
     setInputText('')
     setSuggestedPrompt(null)
@@ -534,6 +548,18 @@ export default function App() {
 
   /** Start a brand-new chat session. */
   const handleNewChat = useCallback(() => {
+    // Cancel any in-flight requests when starting a new session
+    if (chatControllerRef.current) {
+      try { chatControllerRef.current.abort() } catch (e) {}
+      chatControllerRef.current = null
+      setIsLoading(false)
+    }
+    if (enhanceControllerRef.current) {
+      try { enhanceControllerRef.current.abort() } catch (e) {}
+      enhanceControllerRef.current = null
+      setIsEnhancing(false)
+    }
+
     const newId = generateUUID()
     setCurrentSession(newId)
     setMessages([])
@@ -570,8 +596,17 @@ export default function App() {
       setMessages((prev) => [...prev, userMsg])
       setInputText('')
       setSuggestedPrompt(null)
-      setIsLoading(true)
       setFetchError(null)
+
+      // Abort any previous chat request and create a new controller tied to
+      // this specific request so isLoading maps to its lifecycle.
+      if (chatControllerRef.current) {
+        try { chatControllerRef.current.abort() } catch (e) {}
+        chatControllerRef.current = null
+      }
+      const controller = new AbortController()
+      chatControllerRef.current = controller
+      setIsLoading(true)
 
       try {
         const res = await fetch(`${API_BASE}/chat`, {
@@ -581,6 +616,7 @@ export default function App() {
             session_id: currentSession,
             user_question: question,
           }),
+          signal: controller.signal,
         })
 
         if (!res.ok) {
@@ -589,6 +625,9 @@ export default function App() {
         }
 
         const data = await res.json()
+
+        // If this request was superseded/aborted, drop the response.
+        if (chatControllerRef.current !== controller) return
 
         const assistantMsg = {
           role: 'assistant',
@@ -599,6 +638,8 @@ export default function App() {
 
         await loadSessions()
       } catch (err) {
+        // If the fetch was aborted, do not show an error message.
+        if (err && err.name === 'AbortError') return
         console.error('Chat request failed:', err)
         setMessages((prev) => [
           ...prev,
@@ -609,7 +650,11 @@ export default function App() {
           },
         ])
       } finally {
-        setIsLoading(false)
+        // Clear controller and loading state only if this request is still active.
+        if (chatControllerRef.current === controller) {
+          chatControllerRef.current = null
+          setIsLoading(false)
+        }
       }
     },
     [inputText, isLoading, currentSession, loadSessions]
@@ -623,6 +668,13 @@ export default function App() {
     const userInput = inputText.trim()
     if (!userInput || isEnhancing) return
 
+    // Abort any previous enhancement request and create a new controller
+    if (enhanceControllerRef.current) {
+      try { enhanceControllerRef.current.abort() } catch (e) {}
+      enhanceControllerRef.current = null
+    }
+    const controller = new AbortController()
+    enhanceControllerRef.current = controller
     setIsEnhancing(true)
     setEnhanceError(null)
 
@@ -631,6 +683,7 @@ export default function App() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ user_input: userInput }),
+        signal: controller.signal,
       })
 
       if (!res.ok) {
@@ -639,15 +692,20 @@ export default function App() {
       }
 
       const data = await res.json()
+      if (enhanceControllerRef.current !== controller) return
       if (typeof data.enhanced_prompt === 'string' && data.enhanced_prompt.trim()) {
         setSuggestedPrompt(data.enhanced_prompt)
       }
     } catch (err) {
+      if (err && err.name === 'AbortError') return
       console.error('Enhance prompt request failed:', err)
       setEnhanceError('Edge AI unavailable')
       setTimeout(() => setEnhanceError(null), 3000)
     } finally {
-      setIsEnhancing(false)
+      if (enhanceControllerRef.current === controller) {
+        enhanceControllerRef.current = null
+        setIsEnhancing(false)
+      }
     }
   }, [inputText, isEnhancing])
 
