@@ -26,6 +26,7 @@ from typing import Any, Dict, List
 
 from dotenv import find_dotenv, load_dotenv
 from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from init_graph import GraphAction
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
@@ -107,6 +108,38 @@ def _get_embeddings():
     if _embeddings is None:
         _embeddings = build_embeddings_model()
     return _embeddings
+
+
+@app.on_event("shutdown")
+def _shutdown_event() -> None:
+    """Gracefully close long-lived clients on process shutdown.
+
+    This ensures the Neo4j driver and any LLM/embedding clients are
+    closed to free connections and avoid resource leaks during container
+    shutdown or reloads.
+    """
+    global _driver, _llm, _embeddings
+    try:
+        if _driver is not None:
+            try:
+                _driver.close()
+            except Exception as _close_err:
+                print(f"[WARNING] Error closing Neo4j driver during shutdown: {_close_err}")
+            _driver = None
+    finally:
+        # Attempt best-effort cleanup for LLM/embeddings clients if they
+        # expose a close/shutdown method. Otherwise drop references.
+        try:
+            if _llm is not None:
+                close_fn = getattr(_llm, "close", None) or getattr(_llm, "shutdown", None)
+                if callable(close_fn):
+                    try:
+                        close_fn()
+                    except Exception as _llm_err:
+                        print(f"[WARNING] Error closing LLM client during shutdown: {_llm_err}")
+        finally:
+            _llm = None
+            _embeddings = None
 
 
 # ── Pydantic I/O schemas ──────────────────────────────────────────────────────
@@ -896,7 +929,16 @@ def chat(request: ChatRequest) -> ChatResponse:
     # Step 2 uses true hybrid retrieval, mathematically fusing Lucene BM25
     # keyword relevance with cosine-similarity vector search before governance
     # filtering for active policy truth.
-    question_embedding = embeddings.embed_query(user_question)
+    try:
+        question_embedding = embeddings.embed_query(user_question)
+    except Exception as exc:
+        # Embedding failures (network, auth, model errors) should return a
+        # controlled 503 to the client rather than raising an uncaught 500.
+        raise HTTPException(
+            status_code=503,
+            detail=f"Embedding service unavailable: {exc}",
+        ) from exc
+
     active_context = retrieve_active_policy(driver, user_question, question_embedding)
 
     # ── Step 3: Generate answer with retrieved context + conversation history ──
@@ -958,18 +1000,24 @@ async def upload_document(file: UploadFile = File(...)) -> UploadResponse:
         if not file_bytes:
             raise HTTPException(status_code=422, detail="Uploaded file is empty.")
 
-        action = _extract_graph_action_from_upload(file_bytes, filename, mime_type)
+        action = await run_in_threadpool(
+            _extract_graph_action_from_upload,
+            file_bytes,
+            filename,
+            mime_type,
+        )
         # Multimodal Ingestion result is projected into graph-native policy
         # entities to keep downstream retrieval traceable and governance-ready.
         inferred_source_text = (
             f"Multimodal ingestion from {filename}. "
             f"Rule: {action.extracted_rule}"
         )
-        _ingest_graph_action_to_neo4j(
-            action=action,
-            document_name=filename,
-            issue_date=datetime.utcnow().date().isoformat(),
-            source_text=inferred_source_text,
+        await run_in_threadpool(
+            _ingest_graph_action_to_neo4j,
+            action,
+            filename,
+            datetime.utcnow().date().isoformat(),
+            inferred_source_text,
         )
 
         return UploadResponse(
