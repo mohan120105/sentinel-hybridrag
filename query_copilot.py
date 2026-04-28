@@ -203,12 +203,12 @@ def retrieve_active_policy(
 
     cypher_query = """
     CALL {
-        WITH $question_embedding AS qe, $top_k AS tk
+        WITH $question_embedding AS qe
         MATCH (p:Policy)
         SEARCH p IN (
             VECTOR INDEX policy_embeddings
             FOR qe
-            LIMIT tk
+            LIMIT $top_k
         ) SCORE AS vector_score
         RETURN p, vector_score, 0.0 AS text_score
 
