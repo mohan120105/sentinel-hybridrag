@@ -200,7 +200,8 @@ def _fetch_session_history_tx(
     # Fetch the last 4 messages and return them oldest->newest for LLM injection.
     result = tx.run(
         """
-        MATCH (s:Session {id: $session_id})-[:CONTAINS_MESSAGE]->(m:Message)
+        MATCH (s:Session {id: $session_id})-[:CONTAINS_MESSAGE]->(m)
+        WHERE 'Message' IN labels(m)
         WITH m
         ORDER BY m.timestamp DESC
         LIMIT 4
@@ -286,10 +287,11 @@ def _list_sessions_tx(tx: ManagedTransaction) -> List[Dict[str, str | None]]:
     result = tx.run(
         """
         MATCH (s:Session)
-        OPTIONAL MATCH (s)-[:CONTAINS_MESSAGE]->(m:Message)
+        OPTIONAL MATCH (s)-[:CONTAINS_MESSAGE]->(m)
+        WHERE m IS NULL OR 'Message' IN labels(m)
         WITH s, max(m.timestamp) AS last_timestamp
-        OPTIONAL MATCH (s)-[:CONTAINS_MESSAGE]->(u:Message)
-        WHERE u.role = 'user'
+        OPTIONAL MATCH (s)-[:CONTAINS_MESSAGE]->(u)
+        WHERE u IS NOT NULL AND 'Message' IN labels(u) AND u.role = 'user'
         WITH s, last_timestamp, u
         ORDER BY u.timestamp ASC
         WITH s, last_timestamp, collect(u.content)[0] AS first_user_message
@@ -337,7 +339,8 @@ def _fetch_session_messages_tx(
 
     result = tx.run(
         """
-        MATCH (s:Session {id: $session_id})-[:CONTAINS_MESSAGE]->(m:Message)
+        MATCH (s:Session {id: $session_id})-[:CONTAINS_MESSAGE]->(m)
+        WHERE 'Message' IN labels(m)
         RETURN
             m.role AS role,
             m.content AS content,
