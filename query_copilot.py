@@ -204,8 +204,12 @@ def retrieve_active_policy(
     cypher_query = """
     CALL {
         WITH $question_embedding AS qe, $top_k AS tk
-        CALL db.index.vector.queryNodes('policy_embeddings', tk, qe)
-        YIELD node AS p, score AS vector_score
+        MATCH (p:Policy)
+        SEARCH p IN (
+            VECTOR INDEX policy_embeddings
+            FOR qe
+            LIMIT tk
+        ) SCORE AS vector_score
         RETURN p, vector_score, 0.0 AS text_score
 
         UNION ALL
@@ -247,8 +251,12 @@ def retrieve_active_policy(
     """
 
     vector_only_query = """
-    CALL db.index.vector.queryNodes('policy_embeddings', $top_k, $question_embedding)
-    YIELD node AS p, score
+    MATCH (p:Policy)
+    SEARCH p IN (
+        VECTOR INDEX policy_embeddings
+        FOR $question_embedding
+        LIMIT $top_k
+    ) SCORE AS score
     OPTIONAL MATCH (superseder)-[supersedes_rel]->(p)
     WHERE type(supersedes_rel) = 'SUPERSEDES'
     WITH p, score, count(supersedes_rel) AS supersedes_count
