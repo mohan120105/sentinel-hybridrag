@@ -1,0 +1,38 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Environment and secrets
+.env
+.env.*
+
+# Root-level local data and generated assets
+frontend/
+models/
+img_data/
+v1_baseline_docs/
+submission-docs/
+.dist/
+seed_database.py
+
+# IDE and OS files
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+.DS_Store
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# Streamlit cache and logs
+.streamlit/
+*.log
