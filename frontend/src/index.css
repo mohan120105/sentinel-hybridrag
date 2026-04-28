@@ -1,0 +1,29 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Dark scrollbar to match the theme */
+::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #4b5563;
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #6b7280;
+}
+
+/* Smooth textarea height transitions */
+textarea {
+  transition: height 0.1s ease;
+}
+
+/* Custom bg shade used in citations panel */
+.bg-gray-850 {
+  background-color: #1e2330;
+}
