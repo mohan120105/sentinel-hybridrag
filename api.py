@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List
 
@@ -168,6 +169,7 @@ class Citation(BaseModel):
 class ChatResponse(BaseModel):
     answer: str
     citations: List[Citation]
+    sentinel_reasoning: str = Field(default="")
 
     @model_validator(mode="after")
     def compute_match_confidence(self) -> "ChatResponse":
@@ -251,6 +253,114 @@ def _fetch_session_history_tx(
     ]
 
     return records
+
+
+def _extract_question_terms(user_question: str) -> List[str]:
+    """Extract lightweight content terms from the user question."""
+
+    stopwords = {
+        "what",
+        "which",
+        "when",
+        "where",
+        "who",
+        "why",
+        "how",
+        "the",
+        "for",
+        "and",
+        "are",
+        "with",
+        "from",
+        "this",
+        "that",
+        "please",
+        "tell",
+        "about",
+        "does",
+        "do",
+        "is",
+        "a",
+        "an",
+        "to",
+        "of",
+        "in",
+        "on",
+        "as",
+        "by",
+    }
+
+    terms = re.findall(r"[a-z0-9][a-z0-9&/-]{1,}", user_question.lower())
+    return [term for term in terms if term not in stopwords]
+
+
+def _infer_topic_label(user_question: str, active_context: List[ActivePolicy]) -> str:
+    """Infer a human-readable topic label for partial-match explanations."""
+
+    if active_context:
+        top_policy = active_context[0]
+        if top_policy.category and top_policy.category != "General":
+            return top_policy.category.replace("_", " ")
+        if top_policy.document_name:
+            return top_policy.document_name
+
+    terms = _extract_question_terms(user_question)
+    return " ".join(terms[:4]).strip() or "the requested policy"
+
+
+def _classify_context_tier(
+    user_question: str,
+    active_context: List[ActivePolicy],
+) -> tuple[str, str]:
+    """Classify the retrieval as exact, partial, or no-match."""
+
+    if not active_context:
+        return (
+            "no_match",
+            "No verified policy context was retrieved for the question.",
+        )
+
+    top_policy = active_context[0]
+    combined_context = " ".join(
+        [
+            top_policy.document_name,
+            top_policy.category,
+            top_policy.extracted_rule,
+            top_policy.source_text,
+            " ".join(top_policy.customer_types),
+            " ".join(top_policy.required_docs),
+        ]
+    ).lower()
+
+    question_terms = _extract_question_terms(user_question)
+    matched_terms = [term for term in question_terms if term in combined_context]
+    topic_label = _infer_topic_label(user_question, active_context)
+
+    if user_question.lower().strip() and user_question.lower().strip() in combined_context:
+        return (
+            "exact_match",
+            f"Direct evidence found in {top_policy.document_name} under {top_policy.category}.",
+        )
+
+    if len(matched_terms) >= 2:
+        return (
+            "exact_match",
+            f"Direct evidence found in {top_policy.document_name} under {top_policy.category}.",
+        )
+
+    if top_policy.match_confidence >= 20.0 or matched_terms or top_policy.category != "General":
+        return (
+            "partial_match",
+            (
+                f"High similarity found in {top_policy.category} via {top_policy.document_name}, "
+                f"but insufficient data for {topic_label}."
+            ),
+        )
+
+    return (
+        "no_match",
+        "Retrieved context was too weak or irrelevant to support a verified answer.",
+    )
 
 
 def _save_messages_tx(
@@ -728,7 +838,7 @@ def _generate_with_history(
     active_context: List[ActivePolicy],
     user_question: str,
     history: List[Dict[str, str]],
-) -> str:
+) -> tuple[str, str]:
     """Generate a grounded answer using active policies and session history.
 
     Falls back to STRICT_NO_ANSWER when active_context is empty, consistent
@@ -741,10 +851,12 @@ def _generate_with_history(
         history: Prior role/content messages for continuity.
 
     Returns:
-        str: Grounded assistant response or strict fallback string.
+        tuple[str, str]: Grounded assistant response and sentinel reasoning.
     """
     if not active_context:
-        return STRICT_NO_ANSWER
+        return STRICT_NO_ANSWER, "No verified policy context was retrieved for the question."
+
+    tier, sentinel_reasoning = _classify_context_tier(user_question, active_context)
 
     context_blocks = [
         (
@@ -771,9 +883,15 @@ def _generate_with_history(
         # This system directive encodes strict grounding policy to reduce
         # unsupported synthesis and strengthen retrieval-compliance guarantees.
         "You are the Sentinel Banking Co-Pilot. "
-        "Answer the user's question using ONLY the provided active_context. "
-        "If the context is empty or does not contain the answer, you MUST reply with: "
-        '"I cannot find a verified active policy for this in the current database."\n\n'
+        "Use ONLY the provided active_context and follow this tiered behavior. "
+        f"retrieval_tier: {tier}\n"
+        f"sentinel_reasoning: {sentinel_reasoning}\n\n"
+        "Exact Match: If the answer is explicitly present in the context, provide it clearly and directly. "
+        "Partial/Related Match: If the context is semantically related but the exact fact is missing, reply in this style: "
+        '"I found official documentation regarding [Topic], but it does not specifically state the [User\'s specific query]. '
+        "However, based on the available policy: [Summarize the related info]." " "
+        "No Match: Only if the context is completely irrelevant, reply with: "
+        '"I cannot find a verified policy for this in the current database."\n\n'
         f"active_context:\n{context_text}"
     )
 
@@ -788,15 +906,16 @@ def _generate_with_history(
 
     try:
         response = llm.invoke(llm_messages)
-        return str(response.content).strip()
+        return str(response.content).strip(), sentinel_reasoning
     except Exception as exc:
         err = str(exc)
         if "429" in err or "rate" in err.lower():
             return (
                 "Groq API rate limit encountered while generating response. "
-                "Please retry in a few seconds."
+                "Please retry in a few seconds.",
+                sentinel_reasoning,
             )
-        return f"Failed to generate response from Groq: {exc}"
+        return f"Failed to generate response from Groq: {exc}", sentinel_reasoning
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
@@ -948,7 +1067,12 @@ def chat(request: ChatRequest) -> ChatResponse:
     active_context = retrieve_active_policy(driver, user_question, question_embedding)
 
     # ── Step 3: Generate answer with retrieved context + conversation history ──
-    answer = _generate_with_history(llm, active_context, user_question, history)
+    answer, sentinel_reasoning = _generate_with_history(
+        llm,
+        active_context,
+        user_question,
+        history,
+    )
 
     # ── Step 4: Build citation list for the client ─────────────────────────────
     citations = [
@@ -978,7 +1102,11 @@ def chat(request: ChatRequest) -> ChatResponse:
         )
 
     # ── Step 6: Return response with answer and citations ──────────────────────────
-    return ChatResponse(answer=answer, citations=citations)
+    return ChatResponse(
+        answer=answer,
+        citations=citations,
+        sentinel_reasoning=sentinel_reasoning,
+    )
 
 
 @app.post("/upload", response_model=UploadResponse)
