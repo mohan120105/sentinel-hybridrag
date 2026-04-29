@@ -166,9 +166,24 @@ class Citation(BaseModel):
     match_confidence: float = 0.0
 
 
+class GraphNode(BaseModel):
+    id: str
+    label: str
+    type: str
+
+
+class GraphEdge(BaseModel):
+    source: str
+    target: str
+    label: str = Field(default="")
+
+
 class ChatResponse(BaseModel):
     answer: str
     citations: List[Citation]
+    graph_nodes: List[GraphNode] = Field(default_factory=list)
+    graph_edges: List[GraphEdge] = Field(default_factory=list)
+    retrieval_tier: str = Field(default="no_match")
     sentinel_reasoning: str = Field(default="")
 
     @model_validator(mode="after")
@@ -190,6 +205,18 @@ class ChatResponse(BaseModel):
         return self
 
 
+class SessionGraphNode(BaseModel):
+    id: str
+    label: str
+    type: str
+
+
+class SessionGraphEdge(BaseModel):
+    source: str
+    target: str
+    label: str = Field(default="")
+
+
 class UploadResponse(BaseModel):
     message: str
     document_name: str
@@ -208,6 +235,45 @@ class SessionMessage(BaseModel):
     enhanced_prompt: str | None = None
     timestamp: str | None = None
     citations: List[Citation] = []
+    graph_nodes: List[SessionGraphNode] = Field(default_factory=list)
+    graph_edges: List[SessionGraphEdge] = Field(default_factory=list)
+    retrieval_tier: str | None = None
+
+
+def _build_evidence_graph(
+    active_context: List[ActivePolicy],
+) -> tuple[List[GraphNode], List[GraphEdge]]:
+    nodes_by_id: Dict[str, GraphNode] = {}
+    edges_by_key: set[tuple[str, str, str]] = set()
+    graph_nodes: List[GraphNode] = []
+    graph_edges: List[GraphEdge] = []
+
+    for policy in active_context:
+        policy_id = f"policy::{policy.document_name}"
+        category_id = f"category::{policy.category}"
+        rule_id = f"rule::{policy.document_name}::{policy.extracted_rule}"
+
+        for node_id, label, node_type in (
+            (policy_id, policy.document_name, "policy"),
+            (category_id, policy.category, "category"),
+            (rule_id, policy.extracted_rule, "rule"),
+        ):
+            if node_id not in nodes_by_id:
+                node = GraphNode(id=node_id, label=label, type=node_type)
+                nodes_by_id[node_id] = node
+                graph_nodes.append(node)
+
+        for source, target, label in (
+            (policy_id, category_id, "category"),
+            (category_id, rule_id, "rule"),
+        ):
+            edge_key = (source, target, label)
+            if edge_key in edges_by_key:
+                continue
+            edges_by_key.add(edge_key)
+            graph_edges.append(GraphEdge(source=source, target=target, label=label))
+
+    return graph_nodes, graph_edges
 
 
 # ── Neo4j session-memory transaction functions ────────────────────────────────
@@ -308,6 +374,68 @@ def _infer_topic_label(user_question: str, active_context: List[ActivePolicy]) -
     return " ".join(terms[:4]).strip() or "the requested policy"
 
 
+def _build_relational_critic_reasoning(
+    user_question: str,
+    active_context: List[ActivePolicy],
+) -> str:
+    """Format partial-match reasoning as a relational critic."""
+
+    top_policy = active_context[0]
+    topic_label = _infer_topic_label(user_question, active_context)
+    confidence = f"{top_policy.match_confidence:.1f}%"
+    question_terms = _extract_question_terms(user_question)
+    combined_context = " ".join(
+        [
+            top_policy.document_name,
+            top_policy.category,
+            top_policy.extracted_rule,
+            top_policy.source_text,
+            " ".join(top_policy.customer_types),
+            " ".join(top_policy.required_docs),
+        ]
+    ).lower()
+
+    missing_fact = "the exact policy condition or exception needed to answer the question"
+    suggested_expansion = (
+        f"Ask for the exact rule, threshold, or exception under {topic_label} to narrow the policy."
+    )
+
+    if any(term in question_terms for term in {"document", "documents", "docs", "kyc", "proof", "paper"}):
+        missing_fact = "the specific required documents for the exact customer or account type"
+        suggested_expansion = (
+            f"Ask which documents are required for {topic_label} and whether any customer-type exceptions apply."
+        )
+    elif any(term in question_terms for term in {"limit", "threshold", "amount", "maximum", "minimum", "cap", "caps"}):
+        missing_fact = "the exact numeric limit or threshold referenced by the policy"
+        suggested_expansion = (
+            f"Ask for the exact limit, threshold, or cap under {topic_label}, including any exceptions."
+        )
+    elif any(term in question_terms for term in {"who", "whom", "eligible", "eligibility", "customer", "customers", "account", "accounts"}):
+        missing_fact = "the exact eligibility condition or customer segment covered by the policy"
+        suggested_expansion = (
+            f"Ask which customer type or account segment the {topic_label} rule applies to."
+        )
+    elif any(term in question_terms for term in {"when", "time", "timing", "deadline", "frequency", "reporting", "report"}):
+        missing_fact = "the exact timing, deadline, or reporting window required by the policy"
+        suggested_expansion = (
+            f"Ask for the exact timing or reporting window tied to {topic_label}."
+        )
+    elif top_policy.required_docs:
+        missing_fact = "the exact operational condition that links this related rule to the requested scenario"
+        suggested_expansion = (
+            f"Ask how {topic_label} connects to {', '.join(top_policy.required_docs[:2])} in this case."
+        )
+
+    if top_policy.extracted_rule.lower() not in combined_context:
+        missing_fact = "the exact rule wording that would directly answer the request"
+
+    return (
+        f"Topic Match: {topic_label} ({confidence})\n\n"
+        f"Logic Gap Identified: {missing_fact}.\n\n"
+        f"Suggested Expansion: {suggested_expansion}"
+    )
+
+
 def _classify_context_tier(
     user_question: str,
     active_context: List[ActivePolicy],
@@ -351,10 +479,7 @@ def _classify_context_tier(
     if top_policy.match_confidence >= 20.0 or matched_terms or top_policy.category != "General":
         return (
             "partial_match",
-            (
-                f"High similarity found in {top_policy.category} via {top_policy.document_name}, "
-                f"but insufficient data for {topic_label}."
-            ),
+            _build_relational_critic_reasoning(user_question, active_context),
         )
 
     return (
@@ -370,6 +495,7 @@ def _save_messages_tx(
     enhanced_prompt: str | None,
     answer: str,
     citations: List[Citation] | None = None,
+    retrieval_tier: str | None = None,
 ) -> None:
     """Persist user and assistant messages for a completed turn.
 
@@ -403,7 +529,7 @@ def _save_messages_tx(
         FOREACH (_ IN CASE WHEN $enhanced_prompt IS NOT NULL THEN [1] ELSE [] END |
             SET u.enhanced_prompt = $enhanced_prompt
         )
-        CREATE (a:Message {role: 'assistant', content: $answer,   timestamp: $ts_asst, citations: $citations_json})
+        CREATE (a:Message {role: 'assistant', content: $answer,   timestamp: $ts_asst, citations: $citations_json, retrieval_tier: $retrieval_tier})
         CREATE (s)-[:CONTAINS_MESSAGE]->(u)
         CREATE (s)-[:CONTAINS_MESSAGE]->(a)
         """,
@@ -412,6 +538,7 @@ def _save_messages_tx(
         enhanced_prompt=enhanced_prompt,
         answer=answer,
         citations_json=citations_json,
+        retrieval_tier=retrieval_tier,
         ts_user=ts_user,
         ts_asst=ts_asst,
     )
@@ -489,7 +616,8 @@ def _fetch_session_messages_tx(
             properties(m)['content'] AS content,
             properties(m)['enhanced_prompt'] AS enhanced_prompt,
             properties(m)['timestamp'] AS timestamp,
-            properties(m)['citations'] AS citations
+            properties(m)['citations'] AS citations,
+            properties(m)['retrieval_tier'] AS retrieval_tier
         ORDER BY m.timestamp ASC
         """,
         session_id=session_id,
@@ -503,6 +631,7 @@ def _fetch_session_messages_tx(
                 "enhanced_prompt": record.get("enhanced_prompt"),
                 "timestamp": record.get("timestamp"),
                 "citations": [],
+                "retrieval_tier": record.get("retrieval_tier"),
             }
             
             # Recompute confidence from raw score at read time so UI evidence
@@ -832,6 +961,7 @@ def _generate_with_history(
     active_context: List[ActivePolicy],
     user_question: str,
     history: List[Dict[str, str]],
+    retrieval_tier: str | None = None,
 ) -> tuple[str, str]:
     """Generate a grounded answer using active policies and session history.
 
@@ -851,6 +981,7 @@ def _generate_with_history(
         return STRICT_NO_ANSWER, "No verified policy context was retrieved for the question."
 
     tier, sentinel_reasoning = _classify_context_tier(user_question, active_context)
+    retrieval_tier = retrieval_tier or tier
 
     context_blocks = [
         (
@@ -878,7 +1009,7 @@ def _generate_with_history(
         # unsupported synthesis and strengthen retrieval-compliance guarantees.
         "You are the Sentinel Banking Co-Pilot. "
         "Use ONLY the provided active_context and follow this tiered behavior. "
-        f"retrieval_tier: {tier}\n"
+        f"retrieval_tier: {retrieval_tier}\n"
         f"sentinel_reasoning: {sentinel_reasoning}\n\n"
         "Exact Match: If the answer is explicitly present in the context, provide it clearly and directly. "
         "Partial/Related Match: If the context is semantically related but the exact fact is missing, reply in this style: "
@@ -1061,11 +1192,14 @@ def chat(request: ChatRequest) -> ChatResponse:
     active_context = retrieve_active_policy(driver, user_question, question_embedding)
 
     # ── Step 3: Generate answer with retrieved context + conversation history ──
+    retrieval_tier, sentinel_reasoning = _classify_context_tier(user_question, active_context)
+
     answer, sentinel_reasoning = _generate_with_history(
         llm,
         active_context,
         user_question,
         history,
+        retrieval_tier=retrieval_tier,
     )
 
     # ── Step 4: Build citation list for the client ─────────────────────────────
@@ -1077,6 +1211,7 @@ def chat(request: ChatRequest) -> ChatResponse:
         )
         for p in active_context
     ]
+    graph_nodes, graph_edges = _build_evidence_graph(active_context)
 
     # ── Step 5: Persist the new turn to Neo4j with citations (non-fatal on failure) ──────────
     try:
@@ -1088,6 +1223,7 @@ def chat(request: ChatRequest) -> ChatResponse:
                 None,
                 answer,
                 citations,
+                retrieval_tier,
             )
     except (Neo4jError, ServiceUnavailable) as exc:
         # Answer was already generated; log and continue rather than raising.
@@ -1099,6 +1235,9 @@ def chat(request: ChatRequest) -> ChatResponse:
     return ChatResponse(
         answer=answer,
         citations=citations,
+        graph_nodes=graph_nodes,
+        graph_edges=graph_edges,
+        retrieval_tier=retrieval_tier,
         sentinel_reasoning=sentinel_reasoning,
     )
 

@@ -54,6 +54,10 @@ class ActivePolicy(BaseModel):
         ...,
         description="Normalized retrieval confidence percentage for UI display.",
     )
+    version_status: str = Field(
+        ...,
+        description="Version status flag for response metadata.",
+    )
 
 
 def _normalize_match_confidence(score: float, max_score: float) -> float:
@@ -182,6 +186,7 @@ def retrieve_active_policy(
     user_question: str,
     question_embedding: Sequence[float],
     top_k: int = 5,
+    only_latest: bool = True,
 ) -> List[ActivePolicy]:
     """Retrieve active policies with vector search and governance filtering.
 
@@ -196,6 +201,7 @@ def retrieve_active_policy(
         user_question: Original user question text.
         question_embedding: Dense embedding vector for semantic lookup.
         top_k: Maximum number of candidate policies to return.
+        only_latest: When True, exclude policies superseded by newer versions.
 
     Returns:
         List[ActivePolicy]: Ranked active-policy evidence records.
@@ -226,26 +232,27 @@ def retrieve_active_policy(
     WITH p, (vs + (ts / 10.0)) AS combined_score
 
     // 2. Governance Firewall
-    // Strictly exclude superseded nodes so only active policy truth flows
+    // Optionally exclude superseded nodes so only latest policy truth flows
     // into generation and downstream compliance decisions.
     OPTIONAL MATCH (superseder)-[supersedes_rel]->(p)
     WHERE type(supersedes_rel) = 'SUPERSEDES'
-    WITH p, combined_score, count(supersedes_rel) AS supersedes_count
-    WHERE supersedes_count = 0
+    WITH p, combined_score, count(supersedes_rel) AS supersedes_count, $only_latest AS only_latest
+    WHERE (NOT only_latest) OR supersedes_count = 0
 
     OPTIONAL MATCH (p)-[:BELONGS_TO]->(c:Category)
 
     // 3. Multi-Hop Extraction
     OPTIONAL MATCH (p)-[:APPLIES_TO]->(ct:CustomerType)
     OPTIONAL MATCH (p)-[:REQUIRES]->(dr:DocumentRequirement)
-    WITH p, c, combined_score, collect(DISTINCT ct.name) AS customer_types, collect(DISTINCT dr.name) AS required_docs
+    WITH p, c, combined_score, supersedes_count, collect(DISTINCT ct.name) AS customer_types, collect(DISTINCT dr.name) AS required_docs
     RETURN p.name AS document_name,
            coalesce(c.name, "General") AS category,
            coalesce(p.extracted_rule, "") AS extracted_rule,
            coalesce(p.source_text, "") AS source_text,
            customer_types,
            required_docs,
-           combined_score AS score
+            combined_score AS score,
+            CASE WHEN supersedes_count = 0 THEN "LATEST" ELSE "SUPERSEDED" END AS version_status
     ORDER BY score DESC
     LIMIT $top_k
     """
@@ -259,20 +266,21 @@ def retrieve_active_policy(
     ) SCORE AS score
     OPTIONAL MATCH (superseder)-[supersedes_rel]->(p)
     WHERE type(supersedes_rel) = 'SUPERSEDES'
-    WITH p, score, count(supersedes_rel) AS supersedes_count
-    WHERE supersedes_count = 0
+    WITH p, score, count(supersedes_rel) AS supersedes_count, $only_latest AS only_latest
+    WHERE (NOT only_latest) OR supersedes_count = 0
 
     OPTIONAL MATCH (p)-[:BELONGS_TO]->(c:Category)
     OPTIONAL MATCH (p)-[:APPLIES_TO]->(ct:CustomerType)
     OPTIONAL MATCH (p)-[:REQUIRES]->(dr:DocumentRequirement)
-    WITH p, c, score, collect(DISTINCT ct.name) AS customer_types, collect(DISTINCT dr.name) AS required_docs
+    WITH p, c, score, supersedes_count, collect(DISTINCT ct.name) AS customer_types, collect(DISTINCT dr.name) AS required_docs
     RETURN p.name AS document_name,
            coalesce(c.name, "General") AS category,
            coalesce(p.extracted_rule, "") AS extracted_rule,
            coalesce(p.source_text, "") AS source_text,
            customer_types,
            required_docs,
-           score
+            score,
+            CASE WHEN supersedes_count = 0 THEN "LATEST" ELSE "SUPERSEDED" END AS version_status
     ORDER BY score DESC
     LIMIT $top_k
     """
@@ -305,6 +313,7 @@ def retrieve_active_policy(
                 "user_question": user_question,
                 "question_embedding": [float(value) for value in question_embedding],
                 "top_k": top_k,
+                "only_latest": only_latest,
             }
             try:
                 records = session.execute_read(
@@ -328,6 +337,7 @@ def retrieve_active_policy(
                             vector_only_query,
                             question_embedding=query_params["question_embedding"],
                             top_k=top_k,
+                            only_latest=only_latest,
                         )
                     )
                 )
@@ -358,6 +368,7 @@ def retrieve_active_policy(
                     source_text=record["source_text"],
                     score=raw_score,
                     match_confidence=_normalize_match_confidence(raw_score, max_score),
+                    version_status=record["version_status"],
                 )
             )
 
