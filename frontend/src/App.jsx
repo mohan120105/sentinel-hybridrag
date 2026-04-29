@@ -12,6 +12,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+import CitationMap from './CitationMap'
 import {
   Send,
   Sparkles,
@@ -75,6 +76,30 @@ function truncateForMailto(text, maxLength) {
   if (!text) return ''
   if (text.length <= maxLength) return text
   return `${text.slice(0, maxLength)}\n\n[Truncated due to email client length limits]`
+}
+
+function normalizeGraphPayload(raw) {
+  const source = raw?.graph ?? raw?.citation_map ?? raw ?? {}
+  const nodes = Array.isArray(source.nodes)
+    ? source.nodes
+    : Array.isArray(source.graph_nodes)
+      ? source.graph_nodes
+      : []
+  const edges = Array.isArray(source.edges)
+    ? source.edges
+    : Array.isArray(source.graph_edges)
+      ? source.graph_edges
+      : []
+
+  return { nodes, edges }
+}
+
+function normalizeRetrievalTier(message) {
+  const rawTier = String(message?.retrieval_tier || message?.tier || '').trim().toLowerCase()
+  if (rawTier === 'exact_match' || rawTier === 'exact') return 'exact'
+  if (rawTier === 'partial_match' || rawTier === 'partial') return 'partial'
+  if (rawTier === 'no_match' || rawTier === 'no-match' || rawTier === 'none') return 'no_match'
+  return ''
 }
 
 // ── Sub-components ────────────────────────────────────────────────────────────
@@ -260,6 +285,7 @@ function MessageBubble({ message, index, onAskSME }) {
         </div>
 
         <CitationsPanel citations={message.citations} />
+        <CitationMap graph={message.graph} />
         <button
           type="button"
           onClick={() => onAskSME?.(message, index)}
@@ -514,6 +540,8 @@ export default function App() {
             ? msg.enhanced_prompt
             : null,
         citations: Array.isArray(msg.citations) ? msg.citations : [],
+        graph: normalizeGraphPayload(msg),
+        retrieval_tier: normalizeRetrievalTier(msg),
       }))
       setMessages(mapped)
       setFetchError(null)
@@ -592,6 +620,7 @@ export default function App() {
         content: question,
         citations: [],
         enhanced_prompt: null,
+        retrieval_tier: null,
       }
       setMessages((prev) => [...prev, userMsg])
       setInputText('')
@@ -633,6 +662,8 @@ export default function App() {
           role: 'assistant',
           content: data.answer,
           citations: data.citations ?? [],
+          graph: normalizeGraphPayload(data),
+          retrieval_tier: normalizeRetrievalTier(data),
         }
         setMessages((prev) => [...prev, assistantMsg])
 
@@ -647,6 +678,8 @@ export default function App() {
             role: 'assistant',
             content: '⚠️ Backend Service Unavailable. Please try again.',
             citations: [],
+            graph: { nodes: [], edges: [] },
+            retrieval_tier: 'no_match',
           },
         ])
       } finally {
@@ -741,6 +774,7 @@ export default function App() {
       const safeAnswer = truncateForMailto(assistantMessage.content || '', 1200)
 
       const citations = Array.isArray(assistantMessage.citations) ? assistantMessage.citations : []
+      const retrievalTier = normalizeRetrievalTier(assistantMessage)
       const topScore = citations.reduce((best, citation) => {
         const numericFromField =
           typeof citation?.score === 'number'
@@ -770,22 +804,27 @@ export default function App() {
         return Math.max(best, scoreCandidate)
       }, 0)
 
-      const contentLower = String(assistantMessage.content || '').toLowerCase()
-      const isMissingInfo =
-        contentLower.includes('no mention') || contentLower.includes("don't know")
-
-      // Escalation policy maps confidence and missing-information heuristics to
-      // support tiers for consistent enterprise operational governance.
+      // Escalation policy now keys off the retrieval tier first and falls back
+      // to score only for older messages that predate the tier metadata.
       let targetEmail = 'l3-senior-compliance@bank.com'
-      let priorityLabel = '[CRITICAL PRIORITY - Missing Policy/Low Confidence]'
+      let priorityLabel = '[CRITICAL PRIORITY - No Match]'
 
-      if (isMissingInfo || topScore < 60) {
+      if (retrievalTier === 'exact') {
+        targetEmail = 'l1-support@bank.com'
+        priorityLabel = '[STANDARD VERIFICATION - Exact Match]'
+      } else if (retrievalTier === 'partial') {
+        targetEmail = 'l2-specialists@bank.com'
+        priorityLabel = '[HIGH PRIORITY - Partial Match]'
+      } else if (retrievalTier === 'no_match') {
+        targetEmail = 'l3-senior-compliance@bank.com'
+        priorityLabel = '[CRITICAL PRIORITY - No Match]'
+      } else if (topScore < 60) {
         targetEmail = 'l3-senior-compliance@bank.com'
         priorityLabel = '[CRITICAL PRIORITY - Missing Policy/Low Confidence]'
       } else if (topScore >= 60 && topScore < 85) {
         targetEmail = 'l2-specialists@bank.com'
         priorityLabel = '[HIGH PRIORITY - Specialist Review]'
-      } else if (topScore >= 85) {
+      } else {
         targetEmail = 'l1-support@bank.com'
         priorityLabel = '[STANDARD VERIFICATION]'
       }
