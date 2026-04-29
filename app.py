@@ -254,8 +254,14 @@ def render_universal_ingestion() -> None:
     if st.button("Extract + Ingest", type="primary"):
         with st.spinner("Analyzing document and ingesting into Neo4j..."):
             try:
-                from google import genai
-                from google.genai import types as genai_types
+                try:
+                    from google import genai
+                    from google.genai import types as genai_types
+                except ImportError as exc:
+                    raise RuntimeError(
+                        "google-genai is not installed in this deployment. "
+                        "Add google-genai to requirements.txt and redeploy the app."
+                    ) from exc
 
                 prompt = (
                     # "Analyze this banking document. Extract the core policy rule. "

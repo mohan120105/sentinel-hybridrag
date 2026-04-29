@@ -639,8 +639,14 @@ def _extract_graph_action_from_upload(
             empty/invalid.
     """
 
-    from google import genai
-    from google.genai import types as genai_types
+    try:
+        from google import genai
+        from google.genai import types as genai_types
+    except ImportError as exc:
+        raise ValueError(
+            "google-genai is not installed in this deployment. "
+            "Add google-genai to requirements.txt and redeploy the backend."
+        ) from exc
 
     gemini_api_key = os.getenv("GEMINI_API_KEY", "").strip().strip('"').strip("'")
     if not gemini_api_key:
