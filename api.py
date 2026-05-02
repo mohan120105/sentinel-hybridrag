@@ -26,7 +26,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List
 
 from dotenv import find_dotenv, load_dotenv
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from init_graph import CATEGORY_VALUES, GraphAction
@@ -71,6 +71,10 @@ _driver: Driver | None = None
 _llm = None
 _embeddings = None
 
+RBAC_DENIAL_MESSAGE = (
+    "Access Denied: Your clearance level does not permit retrieval of confidential policy data."
+)
+
 
 def _get_driver() -> Driver:
     """Return a cached Neo4j driver singleton.
@@ -111,6 +115,29 @@ def _get_embeddings():
     return _embeddings
 
 
+def get_user_tier(employee_id: str) -> int:
+    """Map an employee identifier prefix to the Sentinel access tier.
+
+    Tier mapping is intentionally prefix-based so the UI can enforce a simple
+    operator identity gate without requiring a separate identity provider.
+
+    Args:
+        employee_id: Employee identifier provided by the operator.
+
+    Returns:
+        int: 1 for Admin, 2 for Operator, 3 for Viewer.
+    """
+
+    normalized_employee_id = (employee_id or "").strip()
+    if normalized_employee_id.startswith("1"):
+        return 1
+    if normalized_employee_id.startswith("2"):
+        return 2
+    if normalized_employee_id.startswith("3"):
+        return 3
+    return 3
+
+
 @app.on_event("shutdown")
 def _shutdown_event() -> None:
     """Gracefully close long-lived clients on process shutdown.
@@ -149,6 +176,7 @@ def _shutdown_event() -> None:
 class ChatRequest(BaseModel):
     session_id: str
     user_question: str
+    employee_id: str
 
 
 class EnhanceRequest(BaseModel):
@@ -773,6 +801,7 @@ def _ingest_graph_action_to_neo4j(
     document_name: str,
     issue_date: str,
     source_text: str,
+    access_code: int,
 ) -> None:
     """Insert a validated graph action into Neo4j with lineage semantics.
 
@@ -795,6 +824,7 @@ def _ingest_graph_action_to_neo4j(
         extracted_rule: $extracted_rule,
         embedding: $embedding,
         action_type: $action_type,
+        access_code: $access_code,
         active: true,
         created_at: datetime($created_at)
     })
@@ -841,6 +871,7 @@ def _ingest_graph_action_to_neo4j(
                 extracted_rule=action.extracted_rule,
                 embedding=embedding,
                 action_type=action.action_type,
+                access_code=access_code,
                 applies_to_customer=action.applies_to_customer,
                 requires_document=action.requires_document,
                 created_at=timestamp,
@@ -1155,11 +1186,16 @@ def chat(request: ChatRequest) -> ChatResponse:
     """
     session_id = request.session_id.strip()
     user_question = request.user_question.strip()
+    employee_id = request.employee_id.strip()
 
     if not session_id:
         raise HTTPException(status_code=422, detail="session_id must not be empty.")
     if not user_question:
         raise HTTPException(status_code=422, detail="user_question must not be empty.")
+    if not employee_id:
+        raise HTTPException(status_code=422, detail="employee_id must not be empty.")
+
+    user_tier = get_user_tier(employee_id)
 
     driver = _get_driver()
     llm = _get_llm()
@@ -1189,18 +1225,27 @@ def chat(request: ChatRequest) -> ChatResponse:
             detail=f"Embedding service unavailable: {exc}",
         ) from exc
 
-    active_context = retrieve_active_policy(driver, user_question, question_embedding)
+    active_context = retrieve_active_policy(
+        driver,
+        user_question,
+        question_embedding,
+        user_tier=user_tier,
+    )
 
     # ── Step 3: Generate answer with retrieved context + conversation history ──
     retrieval_tier, sentinel_reasoning = _classify_context_tier(user_question, active_context)
 
-    answer, sentinel_reasoning = _generate_with_history(
-        llm,
-        active_context,
-        user_question,
-        history,
-        retrieval_tier=retrieval_tier,
-    )
+    if user_tier != 1 and not active_context:
+        answer = RBAC_DENIAL_MESSAGE
+        sentinel_reasoning = RBAC_DENIAL_MESSAGE
+    else:
+        answer, sentinel_reasoning = _generate_with_history(
+            llm,
+            active_context,
+            user_question,
+            history,
+            retrieval_tier=retrieval_tier,
+        )
 
     # ── Step 4: Build citation list for the client ─────────────────────────────
     citations = [
@@ -1242,8 +1287,13 @@ def chat(request: ChatRequest) -> ChatResponse:
     )
 
 
+@app.post("/ingest", response_model=UploadResponse)
 @app.post("/upload", response_model=UploadResponse)
-async def upload_document(file: UploadFile = File(...)) -> UploadResponse:
+async def ingest_document(
+    file: UploadFile = File(...),
+    employee_id: str = Form(...),
+    access_code: int = Form(...),
+) -> UploadResponse:
     """Ingest uploaded policy artifacts via multimodal extraction and graph write.
 
     Args:
@@ -1259,6 +1309,23 @@ async def upload_document(file: UploadFile = File(...)) -> UploadResponse:
     filename = (file.filename or "uploaded_document").strip()
     if not filename:
         raise HTTPException(status_code=422, detail="Uploaded file must have a name.")
+
+    employee_id = employee_id.strip()
+    if not employee_id:
+        raise HTTPException(status_code=422, detail="employee_id must not be empty.")
+
+    user_tier = get_user_tier(employee_id)
+    if user_tier == 3:
+        raise HTTPException(
+            status_code=403,
+            detail="Viewers are not permitted to ingest documents.",
+        )
+
+    if access_code not in {1, 2}:
+        raise HTTPException(
+            status_code=422,
+            detail="access_code must be 1 for Confidential or 2 for General.",
+        )
 
     mime_type = _validate_upload_type(file)
 
@@ -1285,6 +1352,7 @@ async def upload_document(file: UploadFile = File(...)) -> UploadResponse:
             filename,
             datetime.utcnow().date().isoformat(),
             inferred_source_text,
+            access_code,
         )
 
         return UploadResponse(

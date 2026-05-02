@@ -38,6 +38,7 @@ TargetCategory = Literal[
 #     "Risk_Management", "Priority_Sector_Lending", "Audit_And_Inspection"
 # ]
 ActionType = Literal["CREATE_NEW", "SUPERSEDE_OLD"]
+DEFAULT_ACCESS_CODE = 2
 
 CURATOR_PROMPT_TEMPLATE: str = """
 You are Sentinel Curator Agent for Tier-1 banking governance.
@@ -250,6 +251,7 @@ def process_and_ingest(
         extracted_rule: $extracted_rule,
         embedding: $embedding,
         action_type: $action_type,
+        access_code: $access_code,
         active: true,
         created_at: datetime($created_at)
     })
@@ -305,6 +307,7 @@ def process_and_ingest(
                         extracted_rule=action.extracted_rule,
                         embedding=embedding,
                         action_type=action.action_type,
+                        access_code=DEFAULT_ACCESS_CODE,
                         applies_to_customer=action.applies_to_customer,
                         requires_document=action.requires_document,
                         created_at=timestamp,

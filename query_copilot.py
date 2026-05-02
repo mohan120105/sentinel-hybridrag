@@ -187,6 +187,7 @@ def retrieve_active_policy(
     question_embedding: Sequence[float],
     top_k: int = 5,
     only_latest: bool = True,
+    user_tier: int = 1,
 ) -> List[ActivePolicy]:
     """Retrieve active policies with vector search and governance filtering.
 
@@ -216,6 +217,7 @@ def retrieve_active_policy(
             FOR qe
             LIMIT $top_k
         ) SCORE AS vector_score
+        WHERE ($user_tier = 1) OR (p.access_code = 2)
         RETURN p, vector_score, 0.0 AS text_score
 
         UNION ALL
@@ -223,6 +225,7 @@ def retrieve_active_policy(
         WITH $user_question AS uq, $top_k AS tk
         CALL db.index.fulltext.queryNodes('policy_keywords', uq, {limit: tk})
         YIELD node AS p, score AS raw_text_score
+        WHERE ($user_tier = 1) OR (p.access_code = 2)
         RETURN p, 0.0 AS vector_score, raw_text_score AS text_score
     }
     // 1. Score Fusion
@@ -264,6 +267,7 @@ def retrieve_active_policy(
         FOR $question_embedding
         LIMIT $top_k
     ) SCORE AS score
+    WHERE ($user_tier = 1) OR (p.access_code = 2)
     OPTIONAL MATCH (superseder)-[supersedes_rel]->(p)
     WHERE type(supersedes_rel) = 'SUPERSEDES'
     WITH p, score, count(supersedes_rel) AS supersedes_count, $only_latest AS only_latest
@@ -314,6 +318,7 @@ def retrieve_active_policy(
                 "question_embedding": [float(value) for value in question_embedding],
                 "top_k": top_k,
                 "only_latest": only_latest,
+                "user_tier": user_tier,
             }
             try:
                 records = session.execute_read(
@@ -338,6 +343,7 @@ def retrieve_active_policy(
                             question_embedding=query_params["question_embedding"],
                             top_k=top_k,
                             only_latest=only_latest,
+                            user_tier=user_tier,
                         )
                     )
                 )

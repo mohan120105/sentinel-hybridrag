@@ -73,6 +73,7 @@ def ingest_graph_action_to_neo4j(
     document_name: str,
     issue_date: str,
     source_text: str,
+    access_code: int = 2,
 ) -> None:
     """Insert validated GraphAction into Neo4j with embeddings and supersession links."""
 
@@ -85,6 +86,7 @@ def ingest_graph_action_to_neo4j(
         extracted_rule: $extracted_rule,
         embedding: $embedding,
         action_type: $action_type,
+        access_code: $access_code,
         active: true,
         created_at: datetime($created_at)
     })
@@ -130,6 +132,7 @@ def ingest_graph_action_to_neo4j(
                 extracted_rule=action.extracted_rule,
                 embedding=embedding,
                 action_type=action.action_type,
+                access_code=access_code,
                 applies_to_customer=action.applies_to_customer,
                 requires_document=action.requires_document,
                 created_at=timestamp,

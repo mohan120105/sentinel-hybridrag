@@ -43,6 +43,19 @@ function generateUUID() {
   })
 }
 
+function getUserTier(employeeId) {
+  const normalized = String(employeeId || '').trim()
+  if (normalized.startsWith('1')) return 1
+  if (normalized.startsWith('2')) return 2
+  if (normalized.startsWith('3')) return 3
+  return 3
+}
+
+function getStoredEmployeeId() {
+  if (typeof window === 'undefined') return ''
+  return window.localStorage.getItem('sentinel_employee_id') || ''
+}
+
 /**
  * @param {string} id
  * @returns {string}
@@ -126,6 +139,55 @@ function ThinkingIndicator() {
             style={{ animationDelay: '320ms' }}
           />
         </div>
+      </div>
+    </div>
+  )
+}
+
+function AccessGate({ employeeIdDraft, onEmployeeIdDraftChange, onSubmit }) {
+  const tier = getUserTier(employeeIdDraft)
+  const tierLabel = tier === 1 ? 'Admin' : tier === 2 ? 'Operator' : 'Viewer'
+
+  return (
+    <div className="flex h-screen w-screen items-center justify-center bg-[radial-gradient(circle_at_top,_rgba(37,99,235,0.22),_transparent_36%),linear-gradient(135deg,_#030712_0%,_#111827_50%,_#030712_100%)] px-4 text-gray-100">
+      <div className="w-full max-w-md rounded-3xl border border-gray-700/80 bg-gray-900/90 p-8 shadow-2xl backdrop-blur-sm">
+        <div className="flex items-center gap-3">
+          <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-blue-900/50 border border-blue-700/50">
+            <Shield size={22} className="text-blue-300" />
+          </div>
+          <div>
+            <p className="text-[11px] uppercase tracking-[0.35em] text-gray-500">Sentinel access</p>
+            <h1 className="text-xl font-semibold text-gray-50">Employee login</h1>
+          </div>
+        </div>
+
+        <p className="mt-4 text-sm leading-relaxed text-gray-400">
+          Enter your Employee ID to unlock the dashboard. Prefix 1 = Admin, 2 = Operator, 3 = Viewer.
+        </p>
+
+        <form onSubmit={onSubmit} className="mt-6 space-y-4">
+          <label className="block space-y-2">
+            <span className="text-xs font-medium uppercase tracking-wide text-gray-500">Employee ID</span>
+            <input
+              type="text"
+              value={employeeIdDraft}
+              onChange={(e) => onEmployeeIdDraftChange(e.target.value)}
+              placeholder="e.g. 20017"
+              className="w-full rounded-2xl border border-gray-700 bg-gray-950/80 px-4 py-3 text-sm text-gray-100 outline-none placeholder:text-gray-600 focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20"
+            />
+          </label>
+
+          <div className="rounded-2xl border border-gray-700 bg-gray-950/60 px-4 py-3 text-xs text-gray-400">
+            Current clearance preview: <span className="font-semibold text-gray-200">{tierLabel}</span>
+          </div>
+
+          <button
+            type="submit"
+            className="flex w-full items-center justify-center rounded-2xl bg-blue-600 px-4 py-3 text-sm font-medium text-white transition-colors hover:bg-blue-500"
+          >
+            Enter dashboard
+          </button>
+        </form>
       </div>
     </div>
   )
@@ -336,7 +398,9 @@ function EmptyState() {
  * @param {File|null} props.selectedFile
  * @param {'idle'|'uploading'|'success'|'error'} props.uploadStatus
  * @param {any} props.uploadResult
+ * @param {number} props.accessCode
  * @param {(event: React.ChangeEvent<HTMLInputElement>) => void} props.onFileChange
+ * @param {(event: React.ChangeEvent<HTMLSelectElement>) => void} props.onAccessCodeChange
  * @param {(event: React.FormEvent<HTMLFormElement>) => void} props.onSubmit
  * @returns {JSX.Element}
  * Why: Isolates Multimodal Ingestion UI concerns from chat concerns so control
@@ -346,7 +410,9 @@ function IngestionView({
   selectedFile,
   uploadStatus,
   uploadResult,
+  accessCode,
   onFileChange,
+  onAccessCodeChange,
   onSubmit,
 }) {
   const isUploading = uploadStatus === 'uploading'
@@ -396,10 +462,29 @@ function IngestionView({
             </label>
 
             <div className="flex items-center justify-between gap-4 flex-wrap">
+              <div className="flex flex-col gap-3">
+                <label className="block">
+                  <span className="mb-2 block text-xs font-medium uppercase tracking-wide text-gray-500">
+                    Document Sensitivity
+                  </span>
+                  <select
+                    value={accessCode}
+                    onChange={onAccessCodeChange}
+                    className="min-w-[220px] rounded-xl border border-gray-700 bg-gray-950/80 px-3 py-2 text-sm text-gray-100 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20"
+                  >
+                    <option value={1}>Confidential (Access Code 1)</option>
+                    <option value={2}>General (Access Code 2)</option>
+                  </select>
+                </label>
+                <div className="text-xs text-gray-500">
+                  {selectedFile
+                    ? `Ready to process ${selectedFile.name}`
+                    : 'Select a source document to begin extraction'}
+                </div>
+              </div>
+
               <div className="text-xs text-gray-500">
-                {selectedFile
-                  ? `Ready to process ${selectedFile.name}`
-                  : 'Select a source document to begin extraction'}
+                {accessCode === 1 ? 'Confidential policy handling enabled' : 'General policy handling enabled'}
               </div>
 
               <button
@@ -439,7 +524,7 @@ function IngestionView({
                   {isUploading
                     ? 'Waiting for backend extraction to complete'
                     : isSuccess
-                      ? 'Structured output returned from /upload'
+                      ? 'Structured output returned from /ingest'
                       : isError
                         ? 'Upload or ingestion failed'
                         : 'No extraction has been run yet'}
@@ -468,6 +553,8 @@ function IngestionView({
 // ── Main App ──────────────────────────────────────────────────────────────────
 
 export default function App() {
+  const [employeeId, setEmployeeId] = useState(() => getStoredEmployeeId())
+  const [employeeIdDraft, setEmployeeIdDraft] = useState('')
   const [activeTab, setActiveTab] = useState('chat')
   const [sessions, setSessions] = useState([])
   const [currentSession, setCurrentSession] = useState(() => generateUUID())
@@ -479,6 +566,7 @@ export default function App() {
   const [isLoading, setIsLoading] = useState(false)
   const [fetchError, setFetchError] = useState(null)
   const [selectedFile, setSelectedFile] = useState(null)
+  const [accessCode, setAccessCode] = useState(2)
   const [uploadStatus, setUploadStatus] = useState('idle')
   const [uploadResult, setUploadResult] = useState(null)
   const [isHistoryLoading, setIsHistoryLoading] = useState(false)
@@ -500,6 +588,23 @@ export default function App() {
     if (!isLoading) inputRef.current?.focus()
   }, [isLoading])
 
+  const userTier = getUserTier(employeeId)
+  const canIngest = userTier !== 3
+  const userTierLabel = userTier === 1 ? 'Admin' : userTier === 2 ? 'Operator' : 'Viewer'
+
+  useEffect(() => {
+    if (employeeId) {
+      if (typeof window !== 'undefined') {
+        window.localStorage.setItem('sentinel_employee_id', employeeId)
+      }
+      return
+    }
+
+    if (typeof window !== 'undefined') {
+      window.localStorage.removeItem('sentinel_employee_id')
+    }
+  }, [employeeId])
+
   /**
    * Why: Session discovery is explicit and centralized to preserve consistent
    * sidebar ordering and support stateful transcript replay.
@@ -516,10 +621,83 @@ export default function App() {
     }
   }, [])
 
-  /** Fetch session list from the backend on mount. */
   useEffect(() => {
+    if (!employeeId) {
+      setSessions([])
+      return
+    }
+
     loadSessions()
-  }, [loadSessions])
+  }, [employeeId, loadSessions])
+
+  useEffect(() => {
+    if (!canIngest && activeTab === 'ingest') {
+      setActiveTab('chat')
+    }
+  }, [activeTab, canIngest])
+
+  const handleEmployeeLogin = useCallback(
+    (e) => {
+      e?.preventDefault()
+      const normalized = employeeIdDraft.trim()
+      if (!normalized) return
+
+      setEmployeeId(normalized)
+      setEmployeeIdDraft('')
+      setActiveTab('chat')
+      setCurrentSession(generateUUID())
+      setSessions([])
+      setMessages([])
+      setInputText('')
+      setSuggestedPrompt(null)
+      setEnhanceError(null)
+      setIsEnhancing(false)
+      setIsLoading(false)
+      setFetchError(null)
+      setSelectedFile(null)
+      setAccessCode(2)
+      setUploadStatus('idle')
+      setUploadResult(null)
+      setIsHistoryLoading(false)
+
+      if (typeof window !== 'undefined') {
+        window.localStorage.setItem('sentinel_employee_id', normalized)
+      }
+    },
+    [employeeIdDraft]
+  )
+
+  const handleEmployeeLogout = useCallback(() => {
+    if (chatControllerRef.current) {
+      try { chatControllerRef.current.abort() } catch (e) {}
+      chatControllerRef.current = null
+    }
+    if (enhanceControllerRef.current) {
+      try { enhanceControllerRef.current.abort() } catch (e) {}
+      enhanceControllerRef.current = null
+    }
+
+    setEmployeeId('')
+    setEmployeeIdDraft('')
+    setSessions([])
+    setCurrentSession(generateUUID())
+    setMessages([])
+    setInputText('')
+    setSuggestedPrompt(null)
+    setIsEnhancing(false)
+    setEnhanceError(null)
+    setIsLoading(false)
+    setFetchError(null)
+    setSelectedFile(null)
+    setAccessCode(2)
+    setUploadStatus('idle')
+    setUploadResult(null)
+    setIsHistoryLoading(false)
+
+    if (typeof window !== 'undefined') {
+      window.localStorage.removeItem('sentinel_employee_id')
+    }
+  }, [])
 
   /**
    * @param {string} sessionId
@@ -610,6 +788,7 @@ export default function App() {
   const handleSubmit = useCallback(
     async (e) => {
       e?.preventDefault()
+      if (!employeeId) return
       const question = inputText.trim()
       if (!question || isLoading) return
 
@@ -640,10 +819,14 @@ export default function App() {
       try {
         const res = await fetch(`${API_BASE}/chat`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Employee-Id': employeeId,
+          },
           body: JSON.stringify({
             session_id: currentSession,
             user_question: question,
+            employee_id: employeeId,
           }),
           signal: controller.signal,
         })
@@ -690,7 +873,7 @@ export default function App() {
         }
       }
     },
-    [inputText, isLoading, currentSession, loadSessions]
+    [employeeId, inputText, isLoading, currentSession, loadSessions]
   )
 
   /**
@@ -860,6 +1043,10 @@ export default function App() {
     setUploadResult(null)
   }, [])
 
+  const handleAccessCodeChange = useCallback((e) => {
+    setAccessCode(Number(e.target.value) === 1 ? 1 : 2)
+  }, [])
+
   /**
    * Why: Runs controlled upload-to-ingestion flow that returns a structured
    * result for transparent operator review of Multimodal Ingestion outcomes.
@@ -867,6 +1054,7 @@ export default function App() {
   const handleUploadSubmit = useCallback(
     async (e) => {
       e?.preventDefault()
+      if (!employeeId) return
       if (!selectedFile || uploadStatus === 'uploading') return
 
       setUploadStatus('uploading')
@@ -875,9 +1063,14 @@ export default function App() {
       try {
         const formData = new FormData()
         formData.append('file', selectedFile)
+        formData.append('employee_id', employeeId)
+        formData.append('access_code', String(accessCode))
 
-        const res = await fetch(`${API_BASE}/upload`, {
+        const res = await fetch(`${API_BASE}/ingest`, {
           method: 'POST',
+          headers: {
+            'X-Employee-Id': employeeId,
+          },
           body: formData,
         })
 
@@ -904,8 +1097,18 @@ export default function App() {
         })
       }
     },
-    [selectedFile, uploadStatus]
+    [accessCode, employeeId, selectedFile, uploadStatus]
   )
+
+  if (!employeeId) {
+    return (
+      <AccessGate
+        employeeIdDraft={employeeIdDraft}
+        onEmployeeIdDraftChange={setEmployeeIdDraft}
+        onSubmit={handleEmployeeLogin}
+      />
+    )
+  }
 
   // ── Render ──────────────────────────────────────────────────────────────────
 
@@ -978,16 +1181,18 @@ export default function App() {
               >
                 Co-Pilot (Chat)
               </button>
-              <button
-                onClick={() => setActiveTab('ingest')}
-                className={`pb-3 text-sm font-medium transition-colors border-b-2 ${
-                  activeTab === 'ingest'
-                    ? 'text-blue-400 border-blue-400'
-                    : 'text-gray-400 border-transparent hover:text-gray-200'
-                }`}
-              >
-                Knowledge Base (Ingest)
-              </button>
+              {canIngest && (
+                <button
+                  onClick={() => setActiveTab('ingest')}
+                  className={`pb-3 text-sm font-medium transition-colors border-b-2 ${
+                    activeTab === 'ingest'
+                      ? 'text-blue-400 border-blue-400'
+                      : 'text-gray-400 border-transparent hover:text-gray-200'
+                  }`}
+                >
+                  Knowledge Base (Ingest)
+                </button>
+              )}
             </nav>
           </div>
 
@@ -1008,10 +1213,22 @@ export default function App() {
                   ? truncateSessionName(getCurrentSessionName())
                   : selectedFile?.name || 'No file selected'}
               </p>
+              <p className="mt-1 text-[11px] text-gray-500">
+                Employee {employeeId} · {userTierLabel}
+              </p>
             </div>
-            <div className="flex items-center gap-1.5 text-xs text-green-400">
-              <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse" />
-              Live
+            <div className="flex items-center gap-3 text-xs text-green-400">
+              <span className="flex items-center gap-1.5">
+                <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse" />
+                Live
+              </span>
+              <button
+                type="button"
+                onClick={handleEmployeeLogout}
+                className="rounded-full border border-gray-600 px-3 py-1.5 text-xs font-medium text-gray-200 hover:border-blue-500 hover:text-white transition-colors"
+              >
+                Switch employee
+              </button>
             </div>
           </header>
         </div>
@@ -1132,7 +1349,9 @@ export default function App() {
             selectedFile={selectedFile}
             uploadStatus={uploadStatus}
             uploadResult={uploadResult}
+            accessCode={accessCode}
             onFileChange={handleFileChange}
+            onAccessCodeChange={handleAccessCodeChange}
             onSubmit={handleUploadSubmit}
           />
         )}
