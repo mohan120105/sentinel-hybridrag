@@ -590,8 +590,7 @@ def _list_sessions_tx(
     Returns:
         List[Dict[str, str | None]]: Session summaries for sidebar rendering.
     """
-
-        result = tx.run(
+    result = tx.run(
                 """
                 MATCH (s:Session)
                 OPTIONAL MATCH (s)-[:CONTAINS_MESSAGE]->(m)
