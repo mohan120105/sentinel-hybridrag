@@ -26,7 +26,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List
 
 from dotenv import find_dotenv, load_dotenv
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from init_graph import CATEGORY_VALUES, GraphAction
@@ -262,10 +262,12 @@ class SessionMessage(BaseModel):
     content: str
     enhanced_prompt: str | None = None
     timestamp: str | None = None
+    tier: int | None = None
     citations: List[Citation] = []
     graph_nodes: List[SessionGraphNode] = Field(default_factory=list)
     graph_edges: List[SessionGraphEdge] = Field(default_factory=list)
     retrieval_tier: str | None = None
+    sentinel_reasoning: str | None = None
 
 
 def _build_evidence_graph(
@@ -523,7 +525,9 @@ def _save_messages_tx(
     enhanced_prompt: str | None,
     answer: str,
     citations: List[Citation] | None = None,
+    user_tier: int | None = None,
     retrieval_tier: str | None = None,
+    sentinel_reasoning: str | None = None,
 ) -> None:
     """Persist user and assistant messages for a completed turn.
 
@@ -553,11 +557,11 @@ def _save_messages_tx(
     tx.run(
         """
         MATCH (s:Session {id: $session_id})
-        CREATE (u:Message {role: 'user',      content: $question, timestamp: $ts_user})
+        CREATE (u:Message {role: 'user',      content: $question, timestamp: $ts_user, tier: $user_tier})
         FOREACH (_ IN CASE WHEN $enhanced_prompt IS NOT NULL THEN [1] ELSE [] END |
             SET u.enhanced_prompt = $enhanced_prompt
         )
-        CREATE (a:Message {role: 'assistant', content: $answer,   timestamp: $ts_asst, citations: $citations_json, retrieval_tier: $retrieval_tier})
+        CREATE (a:Message {role: 'assistant', content: $answer,   timestamp: $ts_asst, citations: $citations_json, tier: $user_tier, retrieval_tier: $retrieval_tier, sentinel_reasoning: $sentinel_reasoning})
         CREATE (s)-[:CONTAINS_MESSAGE]->(u)
         CREATE (s)-[:CONTAINS_MESSAGE]->(a)
         """,
@@ -566,13 +570,18 @@ def _save_messages_tx(
         enhanced_prompt=enhanced_prompt,
         answer=answer,
         citations_json=citations_json,
+        user_tier=user_tier,
         retrieval_tier=retrieval_tier,
+        sentinel_reasoning=sentinel_reasoning,
         ts_user=ts_user,
         ts_asst=ts_asst,
     )
 
 
-def _list_sessions_tx(tx: ManagedTransaction) -> List[Dict[str, str | None]]:
+def _list_sessions_tx(
+    tx: ManagedTransaction,
+    user_tier: int | None = None,
+) -> List[Dict[str, str | None]]:
     """Return session metadata with display-name and recency semantics.
 
     Args:
@@ -587,7 +596,9 @@ def _list_sessions_tx(tx: ManagedTransaction) -> List[Dict[str, str | None]]:
         MATCH (s:Session)
         OPTIONAL MATCH (s)-[:CONTAINS_MESSAGE]->(m)
         WHERE m IS NULL OR 'Message' IN labels(m)
-        WITH s, max(m.timestamp) AS last_timestamp
+        WITH s, max(m.timestamp) AS last_timestamp, collect(DISTINCT m.tier) AS message_tiers
+        WITH s, last_timestamp, [tier IN message_tiers WHERE tier IS NOT NULL] AS message_tiers
+        WHERE $user_tier IS NULL OR $user_tier IN message_tiers
         OPTIONAL MATCH (s)-[:CONTAINS_MESSAGE]->(u)
         WHERE u IS NOT NULL AND 'Message' IN labels(u) AND u.role = 'user'
         WITH s, last_timestamp, u
@@ -620,7 +631,9 @@ def _list_sessions_tx(tx: ManagedTransaction) -> List[Dict[str, str | None]]:
 
 
 def _fetch_session_messages_tx(
-    tx: ManagedTransaction, session_id: str
+    tx: ManagedTransaction,
+    session_id: str,
+    user_tier: int,
 ) -> List[Dict[str, Any]]:
     """Return complete persisted message history for a session.
     
@@ -637,18 +650,22 @@ def _fetch_session_messages_tx(
 
     result = tx.run(
         """
-        MATCH (s:Session {id: $session_id})-[:CONTAINS_MESSAGE]->(m)
-        WHERE 'Message' IN labels(m)
+                MATCH (s:Session {id: $session_id})-[:CONTAINS_MESSAGE]->(m)
+                WHERE 'Message' IN labels(m)
+                    AND coalesce(m.tier, -1) = $user_tier
         RETURN
             properties(m)['role'] AS role,
             properties(m)['content'] AS content,
             properties(m)['enhanced_prompt'] AS enhanced_prompt,
             properties(m)['timestamp'] AS timestamp,
+                        properties(m)['tier'] AS tier,
             properties(m)['citations'] AS citations,
-            properties(m)['retrieval_tier'] AS retrieval_tier
+                        properties(m)['retrieval_tier'] AS retrieval_tier,
+                        properties(m)['sentinel_reasoning'] AS sentinel_reasoning
         ORDER BY m.timestamp ASC
         """,
         session_id=session_id,
+                user_tier=user_tier,
     )
     messages = []
     for record in result:
@@ -658,8 +675,10 @@ def _fetch_session_messages_tx(
                 "content": record["content"],
                 "enhanced_prompt": record.get("enhanced_prompt"),
                 "timestamp": record.get("timestamp"),
+                "tier": record.get("tier"),
                 "citations": [],
                 "retrieval_tier": record.get("retrieval_tier"),
+                "sentinel_reasoning": record.get("sentinel_reasoning"),
             }
             
             # Recompute confidence from raw score at read time so UI evidence
@@ -1078,7 +1097,7 @@ def _generate_with_history(
 
 
 @app.get("/sessions", response_model=List[SessionSummary])
-def list_sessions() -> List[SessionSummary]:
+def list_sessions(employee_id: str = Query(..., min_length=1)) -> List[SessionSummary]:
     """List all persisted sessions with display-friendly metadata.
 
     Returns:
@@ -1088,9 +1107,11 @@ def list_sessions() -> List[SessionSummary]:
         HTTPException: If Neo4j cannot be reached.
     """
 
+    user_tier = get_user_tier(employee_id)
+
     try:
         with _get_driver().session() as neo4j_session:
-            records = neo4j_session.execute_read(_list_sessions_tx)
+            records = neo4j_session.execute_read(_list_sessions_tx, user_tier)
             return [SessionSummary(**record) for record in records]
     except (Neo4jError, ServiceUnavailable) as exc:
         raise HTTPException(
@@ -1099,7 +1120,10 @@ def list_sessions() -> List[SessionSummary]:
 
 
 @app.get("/sessions/{session_id}/messages", response_model=List[SessionMessage])
-def get_session_messages(session_id: str) -> List[SessionMessage]:
+def get_session_messages(
+    session_id: str,
+    employee_id: str = Query(..., min_length=1),
+) -> List[SessionMessage]:
     """Return full persisted chat history for one session.
 
     Args:
@@ -1116,10 +1140,14 @@ def get_session_messages(session_id: str) -> List[SessionMessage]:
     if not trimmed_session_id:
         raise HTTPException(status_code=422, detail="session_id must not be empty.")
 
+    user_tier = get_user_tier(employee_id)
+
     try:
         with _get_driver().session() as neo4j_session:
             records = neo4j_session.execute_read(
-                _fetch_session_messages_tx, trimmed_session_id
+                _fetch_session_messages_tx,
+                trimmed_session_id,
+                user_tier,
             )
             return [SessionMessage(**record) for record in records]
     except (Neo4jError, ServiceUnavailable) as exc:
@@ -1238,6 +1266,7 @@ def chat(request: ChatRequest) -> ChatResponse:
     if user_tier != 1 and not active_context:
         answer = RBAC_DENIAL_MESSAGE
         sentinel_reasoning = RBAC_DENIAL_MESSAGE
+        retrieval_tier = "access_denied"
     else:
         answer, sentinel_reasoning = _generate_with_history(
             llm,
@@ -1268,7 +1297,9 @@ def chat(request: ChatRequest) -> ChatResponse:
                 None,
                 answer,
                 citations,
+                user_tier,
                 retrieval_tier,
+                sentinel_reasoning,
             )
     except (Neo4jError, ServiceUnavailable) as exc:
         # Answer was already generated; log and continue rather than raising.
