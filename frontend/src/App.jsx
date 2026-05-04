@@ -609,9 +609,11 @@ export default function App() {
    * Why: Session discovery is explicit and centralized to preserve consistent
    * sidebar ordering and support stateful transcript replay.
    */
-  const loadSessions = useCallback(async () => {
+  const loadSessions = useCallback(async (activeEmployeeId) => {
     try {
-      const res = await fetch(`${API_BASE}/sessions`)
+      const res = await fetch(
+        `${API_BASE}/sessions?employee_id=${encodeURIComponent(activeEmployeeId)}`
+      )
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       const data = await res.json()
       setSessions(Array.isArray(data) ? data : [])
@@ -627,7 +629,7 @@ export default function App() {
       return
     }
 
-    loadSessions()
+    loadSessions(employeeId)
   }, [employeeId, loadSessions])
 
   useEffect(() => {
@@ -704,10 +706,12 @@ export default function App() {
    * Why: Hydrates full message history from backend persistence so analysts can
    * reconstruct prior decision context for audit and escalation.
    */
-  const loadSessionMessages = useCallback(async (sessionId) => {
+  const loadSessionMessages = useCallback(async (sessionId, activeEmployeeId) => {
     setIsHistoryLoading(true)
     try {
-      const res = await fetch(`${API_BASE}/sessions/${sessionId}/messages`)
+      const res = await fetch(
+        `${API_BASE}/sessions/${sessionId}/messages?employee_id=${encodeURIComponent(activeEmployeeId)}`
+      )
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       const data = await res.json()
       const mapped = (Array.isArray(data) ? data : []).map((msg) => ({
@@ -749,8 +753,8 @@ export default function App() {
     setCurrentSession(sessionId)
     setInputText('')
     setSuggestedPrompt(null)
-    loadSessionMessages(sessionId)
-  }, [loadSessionMessages])
+    loadSessionMessages(sessionId, employeeId)
+  }, [employeeId, loadSessionMessages])
 
   /** Start a brand-new chat session. */
   const handleNewChat = useCallback(() => {
@@ -850,7 +854,7 @@ export default function App() {
         }
         setMessages((prev) => [...prev, assistantMsg])
 
-        await loadSessions()
+        await loadSessions(employeeId)
       } catch (err) {
         // If the fetch was aborted, do not show an error message.
         if (err && err.name === 'AbortError') return
