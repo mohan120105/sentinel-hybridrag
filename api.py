@@ -591,35 +591,36 @@ def _list_sessions_tx(
         List[Dict[str, str | None]]: Session summaries for sidebar rendering.
     """
 
-    result = tx.run(
-        """
-        MATCH (s:Session)
-        OPTIONAL MATCH (s)-[:CONTAINS_MESSAGE]->(m)
-        WHERE m IS NULL OR 'Message' IN labels(m)
-        WITH s, max(m.timestamp) AS last_timestamp, collect(DISTINCT m.tier) AS message_tiers
-        WITH s, last_timestamp, [tier IN message_tiers WHERE tier IS NOT NULL] AS message_tiers
-        WHERE $user_tier IS NULL OR $user_tier IN message_tiers
-        OPTIONAL MATCH (s)-[:CONTAINS_MESSAGE]->(u)
-        WHERE u IS NOT NULL AND 'Message' IN labels(u) AND u.role = 'user'
-        WITH s, last_timestamp, u
-        ORDER BY u.timestamp ASC
-        WITH s, last_timestamp, collect(u.content)[0] AS first_user_message
-        RETURN
-          s.id AS session_id,
-          CASE
-            WHEN first_user_message IS NULL OR trim(first_user_message) = ''
-              THEN 'Session ' + substring(s.id, 0, 8)
-            WHEN size(first_user_message) > 48
-              THEN substring(first_user_message, 0, 48) + '...'
-            ELSE first_user_message
-          END AS session_name,
-          last_timestamp
-        ORDER BY
-          CASE WHEN last_timestamp IS NULL THEN 1 ELSE 0 END ASC,
-          last_timestamp DESC,
-          s.id ASC
-        """
-    )
+        result = tx.run(
+                """
+                MATCH (s:Session)
+                OPTIONAL MATCH (s)-[:CONTAINS_MESSAGE]->(m)
+                WHERE m IS NULL OR 'Message' IN labels(m)
+                WITH s, max(m.timestamp) AS last_timestamp, collect(DISTINCT m.tier) AS message_tiers
+                WITH s, last_timestamp, [tier IN message_tiers WHERE tier IS NOT NULL] AS message_tiers
+                WHERE $user_tier IS NULL OR $user_tier IN message_tiers
+                OPTIONAL MATCH (s)-[:CONTAINS_MESSAGE]->(u)
+                WHERE u IS NOT NULL AND 'Message' IN labels(u) AND u.role = 'user'
+                WITH s, last_timestamp, u
+                ORDER BY u.timestamp ASC
+                WITH s, last_timestamp, collect(u.content)[0] AS first_user_message
+                RETURN
+                    s.id AS session_id,
+                    CASE
+                        WHEN first_user_message IS NULL OR trim(first_user_message) = ''
+                            THEN 'Session ' + substring(s.id, 0, 8)
+                        WHEN size(first_user_message) > 48
+                            THEN substring(first_user_message, 0, 48) + '...'
+                        ELSE first_user_message
+                    END AS session_name,
+                    last_timestamp
+                ORDER BY
+                    CASE WHEN last_timestamp IS NULL THEN 1 ELSE 0 END ASC,
+                    last_timestamp DESC,
+                    s.id ASC
+                """,
+                user_tier=user_tier,
+        )
     return [
         {
             "session_id": record["session_id"],
