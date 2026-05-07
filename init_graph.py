@@ -11,9 +11,8 @@ from __future__ import annotations
 
 import os
 from datetime import datetime
-from typing import Dict, List, Literal, Optional, Sequence
+from typing import Any, Dict, List, Literal, Optional, Sequence
 
-from langchain_huggingface import HuggingFaceEndpointEmbeddings
 from langchain_groq import ChatGroq
 from neo4j import Driver, GraphDatabase
 from neo4j.exceptions import Neo4jError, ServiceUnavailable
@@ -26,6 +25,9 @@ CATEGORY_VALUES: tuple[str, ...] = (
     "Tax_Compliance", "Foreign_Exchange_FEMA", "Digital_Payments_UPI", 
     "Risk_Management", "Priority_Sector_Lending", "Audit_And_Inspection",
 )
+
+# Embedding dimensionality for paraphrase-multilingual-MiniLM-L12-v2
+EMBEDDING_DIM = 384
 
 TargetCategory = Literal[
     "Retail_Loans", "Corporate_Banking", "KYC_AML", "Credit_Cards", 
@@ -187,7 +189,7 @@ def create_policy_fulltext_index(driver: Driver) -> None:
         raise
 
 
-def get_mock_documents() -> List[Dict[str, str]]:
+def get_mock_documents() -> List[Dict[str, Any]]:
     """Return synthetic banking compliance memos for ingestion tests.
 
     Includes an older AML policy and a newer urgent circular that supersedes it,
@@ -196,8 +198,11 @@ def get_mock_documents() -> List[Dict[str, str]]:
 
     return [
         {
+            "document_id": "POL-AML-2024-001",
             "name": "AML_2024_PAN_Limit_Memo",
             "issue_date": "2024-04-15",
+            "tier_level": 2,
+            "source": "RBI_Circular_Archive",
             "text": (
                 "For cash deposits above INR 100,000 in a single day, customers must "
                 "provide PAN or Form 60. Branch staff must retain transaction logs for "
@@ -205,8 +210,11 @@ def get_mock_documents() -> List[Dict[str, str]]:
             ),
         },
         {
+            "document_id": "POL-AML-2026-004",
             "name": "AML_2026_Urgent_Update",
             "issue_date": "2026-01-10",
+            "tier_level": 2,
+            "source": "RBI_Urgent_Bulletin",
             "text": (
                 "This urgent circular supersedes AML_2024_PAN_Limit_Memo. For cash "
                 "deposits above INR 50,000, PAN verification is mandatory. Branch staff "
@@ -215,8 +223,11 @@ def get_mock_documents() -> List[Dict[str, str]]:
             ),
         },
         {
+            "document_id": "POL-RL-2025-019",
             "name": "Retail_NRI_Home_Loan_Policy",
             "issue_date": "2025-08-01",
+            "tier_level": 2,
+            "source": "Retail_Product_Manual",
             "text": (
                 "NRI home loan applications require passport copy, overseas address proof, "
                 "and salary slips. The interest rate starts at 8.35% p.a. with a maximum "
@@ -229,8 +240,8 @@ def get_mock_documents() -> List[Dict[str, str]]:
 def process_and_ingest(
     driver: Driver,
     llm: ChatGroq,
-    embeddings_model: HuggingFaceEndpointEmbeddings,
-    documents: List[Dict[str, str]],
+    embeddings_model: Any,
+    documents: List[Dict[str, Any]],
 ) -> None:
     """Extract graph actions with Groq and write policy lineage into Neo4j.
 
@@ -244,17 +255,17 @@ def process_and_ingest(
 
     create_policy_query = """
     MATCH (c:Category {name: $category_name})
-    CREATE (p:Policy {
-        name: $policy_name,
-        issue_date: $issue_date,
-        source_text: $source_text,
-        extracted_rule: $extracted_rule,
-        embedding: $embedding,
-        action_type: $action_type,
-        access_code: $access_code,
-        active: true,
-        created_at: datetime($created_at)
-    })
+    MERGE (p:Policy {name: $policy_name})
+    ON CREATE SET p.created_at = datetime($created_at)
+    SET p.issue_date = $issue_date,
+        p.source_text = $source_text,
+        p.extracted_rule = $extracted_rule,
+        p.embedding = $embedding,
+        p.action_type = $action_type,
+        p.access_code = $access_code,
+        p.source = $source,
+        p.active = true,
+        p.updated_at = datetime($created_at)
     MERGE (p)-[:BELONGS_TO]->(c)
     WITH p
     UNWIND (CASE WHEN size($applies_to_customer) > 0 THEN $applies_to_customer ELSE [null] END) AS customer
@@ -268,6 +279,7 @@ def process_and_ingest(
         MERGE (dr:DocumentRequirement {name: doc})
         MERGE (p)-[:REQUIRES]->(dr)
     )
+    WITH DISTINCT p
     RETURN p.name AS created_policy
     """
 
@@ -282,6 +294,9 @@ def process_and_ingest(
 
     for document in documents:
         document_name = document["name"]
+        # Use schema 'access_code' (int) as the GLAC attribute. Default to DEFAULT_ACCESS_CODE.
+        access_code = int(document.get("access_code", document.get("tier_level", DEFAULT_ACCESS_CODE)))
+        source = str(document.get("source", "unknown"))
         try:
             prompt = CURATOR_PROMPT_TEMPLATE.format(
                 categories=", ".join(CATEGORY_VALUES),
@@ -291,6 +306,7 @@ def process_and_ingest(
             )
 
             action: GraphAction = structured_llm.invoke(prompt)
+            # Symmetric multilingual model: no passage/query prefixes.
             semantic_text = f"{action.extracted_rule}\n\n{document['text']}"
             question_embedding: Sequence[float] = embeddings_model.embed_query(semantic_text)
             embedding = [float(value) for value in question_embedding]
@@ -307,7 +323,8 @@ def process_and_ingest(
                         extracted_rule=action.extracted_rule,
                         embedding=embedding,
                         action_type=action.action_type,
-                        access_code=DEFAULT_ACCESS_CODE,
+                        access_code=access_code,
+                        source=source,
                         applies_to_customer=action.applies_to_customer,
                         requires_document=action.requires_document,
                         created_at=timestamp,
@@ -376,6 +393,20 @@ def build_groq_llm() -> ChatGroq:
     api_key = os.getenv("GROQ_API_KEY")
     if not api_key:
         raise ValueError("GROQ_API_KEY is not set. Export it before running this script.")
+    # Ensure older/newer langchain packages don't fail due to missing globals
+    try:
+        import langchain as _langchain
+
+        if not hasattr(_langchain, "verbose"):
+            setattr(_langchain, "verbose", False)
+        if not hasattr(_langchain, "debug"):
+            setattr(_langchain, "debug", False)
+        if not hasattr(_langchain, "llm_cache"):
+            setattr(_langchain, "llm_cache", None)
+    except Exception:
+        # Best-effort: ignore if langchain import fails here; the ChatGroq
+        # constructor will raise a clear error about missing deps.
+        pass
 
     return ChatGroq(
         model="llama-3.3-70b-versatile",
@@ -384,18 +415,63 @@ def build_groq_llm() -> ChatGroq:
     )
 
 
-def build_embeddings_model() -> HuggingFaceEndpointEmbeddings:
-    """Create cloud sentence-transformer embeddings client for policy vectors."""
+def build_embeddings_model() -> Any:
+    """Create embeddings client using HF Inference API or local model."""
+
+    model_name = os.getenv(
+        "HF_EMBEDDING_MODEL",
+        "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+    )
+    use_local = os.getenv("HF_EMBEDDING_LOCAL", "false").lower() in {"1", "true", "yes"}
+
+    if use_local:
+        from langchain_huggingface import HuggingFaceEmbeddings
+
+        return HuggingFaceEmbeddings(model_name=model_name)
 
     hf_token = os.getenv("HF_TOKEN")
     if not hf_token:
-        raise ValueError("HF_TOKEN is not set. Export it before running this script.")
+        raise ValueError("HF_TOKEN is not set. Export it or set HF_EMBEDDING_LOCAL=true.")
 
-    return HuggingFaceEndpointEmbeddings(
-        model="sentence-transformers/all-MiniLM-L6-v2",
-        task="feature-extraction",
-        huggingfacehub_api_token=hf_token,
-    )
+    # Support both older and newer constructor signatures.
+    try:
+        from langchain_community.embeddings import HuggingFaceInferenceAPIEmbeddings
+    except ModuleNotFoundError:
+        from langchain_huggingface import HuggingFaceEmbeddings
+
+        print(
+            "langchain_community is unavailable; falling back to local "
+            "HuggingFaceEmbeddings."
+        )
+        return HuggingFaceEmbeddings(model_name=model_name)
+
+    try:
+        return HuggingFaceInferenceAPIEmbeddings(
+            api_key=hf_token,
+            model_name=model_name,
+        )
+    except TypeError:
+        return HuggingFaceInferenceAPIEmbeddings(
+            huggingfacehub_api_token=hf_token,
+            model_name=model_name,
+        )
+
+
+def verify_embedding_api_connectivity(embeddings_model: Any) -> None:
+    """Validate embedding API reachability and expected vector dimension."""
+
+    probe_text = "connectivity probe"
+    vector = embeddings_model.embed_query(probe_text)
+    if not isinstance(vector, Sequence):
+        raise ValueError("Embedding API returned a non-sequence response.")
+
+    dimension = len(vector)
+    if dimension != EMBEDDING_DIM:
+        raise ValueError(
+            f"Embedding dimension mismatch: expected {EMBEDDING_DIM}, got {dimension}."
+        )
+
+    print(f"Embedding connectivity check passed (dimension={dimension}).")
 
 
 def main() -> None:
@@ -406,9 +482,9 @@ def main() -> None:
     try:
         llm = build_groq_llm()
         embeddings_model = build_embeddings_model()
-        embedding_dimensions = len(embeddings_model.embed_query("dimension_probe"))
+        verify_embedding_api_connectivity(embeddings_model)
         initialize_ontology(driver)
-        create_policy_vector_index(driver, embedding_dimensions)
+        create_policy_vector_index(driver, EMBEDDING_DIM)
         create_policy_fulltext_index(driver)
         documents = get_mock_documents()
         process_and_ingest(driver, llm, embeddings_model, documents)

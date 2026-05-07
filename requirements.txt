@@ -13,3 +13,7 @@ pydantic>=2.7.0,<3.0.0
 python-dotenv>=1.0.1,<2.0.0
 google-genai>=1.2.0
 langchain-google-genai
+# Optional: FastText for language detection (may require build tools on Windows)
+fasttext>=0.9.2
+# Fallback pure-Python detector
+langdetect>=1.0.9

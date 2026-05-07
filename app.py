@@ -20,6 +20,7 @@ from query_copilot import (
     build_groq_llm,
     build_neo4j_driver,
     generate_answer,
+    detect_user_language,
     load_environment,
     retrieve_active_policy,
 )
@@ -42,8 +43,6 @@ QUESTION_STOPWORDS: Set[str] = {
     "that",
     "please",
 }
-
-
 @st.cache_resource(show_spinner=False)
 def get_cached_driver() -> Driver:
     """Create and cache Neo4j driver for low-latency Streamlit interactions."""
@@ -454,6 +453,8 @@ def render_copilot_retrieval() -> None:
                 llm = get_cached_llm()
                 embeddings_model = get_cached_embeddings_model()
 
+                # Detect language, embed, retrieve, then generate answer in detected language
+                detected_language = detect_user_language(user_question)
                 question_embedding = embeddings_model.embed_query(user_question)
                 active_context = retrieve_active_policy(
                     driver,
@@ -462,7 +463,7 @@ def render_copilot_retrieval() -> None:
                     top_k=5,
                 )
                 # active_context = _filter_relevant_context(user_question, retrieved_context)
-                answer = generate_answer(llm, active_context, user_question)
+                answer = generate_answer(llm, active_context, user_question, detected_language)
                 evidence = _format_evidence(active_context)
 
                 st.markdown(answer)

@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 from dotenv import find_dotenv, load_dotenv
+from tqdm import tqdm
 from pydantic import ValidationError
 
 from init_graph import CATEGORY_VALUES, GraphAction
@@ -242,8 +243,9 @@ def main() -> None:
     print(f"Found {total} files in {BASELINE_DIR.resolve()}")
     print(f"Using Gemini model: {model_name}")
 
-    for index, file_path in enumerate(files, start=1):
-        print(f"Ingesting {index}/{total}: {file_path.name}...", end=" ")
+    # Use tqdm to display re-indexing progress for the banking PDFs
+    for index, file_path in enumerate(tqdm(files, desc="Re-indexing PDFs", unit="file"), start=1):
+        tqdm.write(f"Ingesting {index}/{total}: {file_path.name}...")
         try:
             action = _extract_graph_action_from_file(file_path=file_path, model_name=model_name)
 

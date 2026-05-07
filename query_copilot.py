@@ -20,18 +20,125 @@ import os
 from typing import List, Sequence
 
 from dotenv import find_dotenv, load_dotenv
+from typing import Optional
 from langchain_core.prompts import PromptTemplate
 from langchain_huggingface import HuggingFaceEndpointEmbeddings
 from langchain_groq import ChatGroq
 from neo4j import Driver
 from neo4j.exceptions import Neo4jError, ServiceUnavailable
+import requests
 from pydantic import BaseModel, Field
 
 from connect import build_neo4j_driver as _build_neo4j_driver_from_connect
 
+# --- Language detection: prefer FastText lid.176.bin, fallback to langdetect ---
+try:
+    import fasttext as _fasttext  # type: ignore
+    _FASTTEXT_AVAILABLE = True
+except ImportError:
+    _fasttext = None  # type: ignore
+    _FASTTEXT_AVAILABLE = False
+
+try:
+    from langdetect import detect as _langdetect_detect  # type: ignore
+    _LANGDETECT_AVAILABLE = True
+except ImportError:
+    _langdetect_detect = None  # type: ignore
+    _LANGDETECT_AVAILABLE = False
+
+import pathlib
+
+# Default model lookup paths (env override supported)
+FASTTEXT_MODEL_ENV = os.getenv("FASTTEXT_LANG_MODEL")
+DEFAULT_FASTTEXT_PATHS = [
+    FASTTEXT_MODEL_ENV,
+    os.path.join(os.path.dirname(__file__), "models", "lid.176.bin"),
+    os.path.join(os.path.dirname(__file__), "lid.176.bin"),
+]
+
+# Minimal ISO code -> language name mapping (extend as needed)
+LANG_CODE_TO_NAME = {
+    "en": "English",
+    "hi": "Hindi",
+    "te": "Telugu",
+    "es": "Spanish",
+    "fr": "French",
+    "de": "German",
+    "pt": "Portuguese",
+    "zh": "Chinese",
+    "ar": "Arabic",
+    "bn": "Bengali",
+    "pa": "Punjabi",
+    "mr": "Marathi",
+    "ta": "Tamil",
+    "kn": "Kannada",
+    "ml": "Malayalam",
+    "gu": "Gujarati",
+    "ur": "Urdu",
+}
+
+_FASTTEXT_MODEL: any = None
+
+def _find_fasttext_model() -> str | None:
+    """Return path to a FastText model if found, otherwise None.
+
+    Accept common compressed (.ftz) and uncompressed (.bin) filenames.
+    """
+    candidates: list[str] = []
+    for p in DEFAULT_FASTTEXT_PATHS:
+        if not p:
+            continue
+        path = pathlib.Path(p)
+        candidates.append(str(path))
+        # If no suffix provided, try common extensions
+        if path.suffix == "":
+            candidates.append(str(path.with_suffix(".bin")))
+            candidates.append(str(path.with_suffix(".ftz")))
+        else:
+            suf = path.suffix.lower()
+            if suf == ".bin":
+                candidates.append(str(path.with_suffix(".ftz")))
+            elif suf == ".ftz":
+                candidates.append(str(path.with_suffix(".bin")))
+
+    # Return first existing candidate
+    for c in candidates:
+        try:
+            pth = pathlib.Path(c)
+            if pth.exists() and pth.is_file():
+                return str(pth)
+        except Exception:
+            continue
+    return None
+
+
+def ensure_fasttext_model() -> str | None:
+    """Ensure a FastText model exists and load it. Returns model path or None.
+
+    If the model is missing, this function does not attempt to download it
+    automatically but returns None so the caller can present instructions.
+    """
+    global _FASTTEXT_MODEL
+    if _FASTTEXT_MODEL is not None:
+        return _FASTTEXT_MODEL
+
+    model_path = _find_fasttext_model()
+    if model_path and _FASTTEXT_AVAILABLE and _fasttext is not None:
+        try:
+            _FASTTEXT_MODEL = _fasttext.load_model(model_path)  # type: ignore
+            return model_path
+        except Exception:
+            return None
+    return None
+
+
+
 STRICT_NO_ANSWER = (
     "I cannot find a verified active policy for this in the current database."
 )
+
+# Embedding dimensionality expected from the multilingual MiniLM paraphrase model (384)
+EMBEDDING_DIM = 384
 
 
 class ActivePolicy(BaseModel):
@@ -75,6 +182,43 @@ def _normalize_match_confidence(score: float, max_score: float) -> float:
         return 0.0
     normalized = max(0.0, min(score / max_score, 1.0))
     return round(normalized * 96.5, 1)
+
+
+def detect_user_language(text: str) -> str:
+    """Detect user language using FastText with langdetect fallback.
+
+    Returns a full language name (e.g., 'Telugu', 'Hindi', 'Spanish').
+    Defaults to 'English' on low confidence or errors.
+    """
+    text = (text or "").strip()
+    if not text:
+        return "English"
+
+    # 1) FastText path
+    try:
+        if _FASTTEXT_AVAILABLE and _fasttext is not None:
+            model_path = ensure_fasttext_model()
+            if model_path and _FASTTEXT_MODEL is not None:
+                labels, probs = _FASTTEXT_MODEL.predict(text, k=1)  # type: ignore
+                if labels and probs:
+                    code = labels[0].replace("__label__", "")
+                    confidence = float(probs[0])
+                    if confidence >= 0.50:
+                        return LANG_CODE_TO_NAME.get(code, code)
+                    # low confidence -> fall through to fallback
+    except Exception:
+        pass
+
+    # 2) langdetect fallback
+    try:
+        if _LANGDETECT_AVAILABLE and _langdetect_detect is not None:
+            code = _langdetect_detect(text)  # type: ignore
+            return LANG_CODE_TO_NAME.get(code, code)
+    except Exception:
+        pass
+
+    # Default
+    return "English"
 
 
 def load_environment() -> None:
@@ -161,6 +305,15 @@ def build_groq_llm() -> ChatGroq:
     if not api_key:
         raise ValueError("GROQ_API_KEY is not set. Export it before running this script.")
 
+    # Ensure langchain global compatibility (some versions expect langchain.verbose)
+    try:
+        import langchain as _langchain
+
+        if not hasattr(_langchain, "verbose"):
+            setattr(_langchain, "verbose", False)
+    except Exception:
+        pass
+
     return ChatGroq(model="llama-3.3-70b-versatile", temperature=0, api_key=api_key)
 
 
@@ -170,15 +323,35 @@ def build_embeddings_model() -> HuggingFaceEndpointEmbeddings:
     Returns:
         HuggingFaceEndpointEmbeddings: Embedding client for query vectorization.
     """
+    # Prefer paraphrase-multilingual-MiniLM-L12-v2 for symmetric multilingual embeddings.
+    model_name = os.getenv(
+        "HF_EMBEDDING_MODEL",
+        "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+    )
+    use_local = os.getenv("HF_EMBEDDING_LOCAL", "false").lower() in {"1", "true", "yes"}
+
+    if use_local:
+        # Use local HuggingFace model through langchain_huggingface
+        from langchain_huggingface import HuggingFaceEmbeddings
+
+        return HuggingFaceEmbeddings(model_name=model_name)
+
     hf_token = os.getenv("HF_TOKEN")
     if not hf_token:
-        raise ValueError("HF_TOKEN is not set. Export it before running this script.")
+        raise ValueError("HF_TOKEN is not set. Export it or set HF_EMBEDDING_LOCAL=true.")
 
-    return HuggingFaceEndpointEmbeddings(
-        model="sentence-transformers/all-MiniLM-L6-v2",
-        task="feature-extraction",
-        huggingfacehub_api_token=hf_token,
-    )
+    try:
+        from langchain_community.embeddings import HuggingFaceInferenceAPIEmbeddings
+    except ModuleNotFoundError:
+        from langchain_huggingface import HuggingFaceEmbeddings
+
+        print("langchain_community is unavailable; falling back to local HuggingFaceEmbeddings.")
+        return HuggingFaceEmbeddings(model_name=model_name)
+
+    try:
+        return HuggingFaceInferenceAPIEmbeddings(huggingfacehub_api_token=hf_token, model_name=model_name)
+    except TypeError:
+        return HuggingFaceInferenceAPIEmbeddings(api_key=hf_token, model_name=model_name)
 
 
 def retrieve_active_policy(
@@ -188,6 +361,7 @@ def retrieve_active_policy(
     top_k: int = 5,
     only_latest: bool = True,
     user_tier: int = 1,
+    similarity_threshold: float = 0.7,
 ) -> List[ActivePolicy]:
     """Retrieve active policies with vector search and governance filtering.
 
@@ -217,7 +391,7 @@ def retrieve_active_policy(
             FOR qe
             LIMIT $top_k
         ) SCORE AS vector_score
-        WHERE ($user_tier = 1) OR (p.access_code = 2)
+        WHERE ($user_tier >= p.access_code) AND vector_score > $similarity_threshold
         RETURN p, vector_score, 0.0 AS text_score
 
         UNION ALL
@@ -225,7 +399,7 @@ def retrieve_active_policy(
         WITH $user_question AS uq, $top_k AS tk
         CALL db.index.fulltext.queryNodes('policy_keywords', uq, {limit: tk})
         YIELD node AS p, score AS raw_text_score
-        WHERE ($user_tier = 1) OR (p.access_code = 2)
+        WHERE ($user_tier >= p.access_code)
         RETURN p, 0.0 AS vector_score, raw_text_score AS text_score
     }
     // 1. Score Fusion
@@ -233,6 +407,7 @@ def retrieve_active_policy(
     // Normalize BM25 score and mathematically fuse it with cosine-style
     // vector similarity to achieve true hybrid retrieval behavior.
     WITH p, (vs + (ts / 10.0)) AS combined_score
+    WHERE vs > $similarity_threshold
 
     // 2. Governance Firewall
     // Optionally exclude superseded nodes so only latest policy truth flows
@@ -267,7 +442,7 @@ def retrieve_active_policy(
         FOR $question_embedding
         LIMIT $top_k
     ) SCORE AS score
-    WHERE ($user_tier = 1) OR (p.access_code = 2)
+    WHERE ($user_tier >= p.access_code) AND score > $similarity_threshold
     OPTIONAL MATCH (superseder)-[supersedes_rel]->(p)
     WHERE type(supersedes_rel) = 'SUPERSEDES'
     WITH p, score, count(supersedes_rel) AS supersedes_count, $only_latest AS only_latest
@@ -319,6 +494,7 @@ def retrieve_active_policy(
                 "top_k": top_k,
                 "only_latest": only_latest,
                 "user_tier": user_tier,
+                "similarity_threshold": float(similarity_threshold),
             }
             try:
                 records = session.execute_read(
@@ -344,6 +520,7 @@ def retrieve_active_policy(
                             top_k=top_k,
                             only_latest=only_latest,
                             user_tier=user_tier,
+                            similarity_threshold=query_params["similarity_threshold"],
                         )
                     )
                 )
@@ -351,7 +528,34 @@ def retrieve_active_policy(
         if not records:
             return []
 
-        max_score = max(float(record["score"]) for record in records)
+        # Optional: filter by sentence-similarity endpoint if configured.
+        hf_sim_endpoint = os.getenv("HF_SIMILARITY_ENDPOINT")
+        hf_token = os.getenv("HF_TOKEN")
+        if hf_sim_endpoint and hf_token:
+            try:
+                sentences = [str(rec.get("source_text", "")) for rec in records]
+                payload = {"inputs": {"source_sentence": f"{user_question}", "sentences": sentences}}
+                headers = {"Authorization": f"Bearer {hf_token}", "Content-Type": "application/json"}
+                resp = requests.post(hf_sim_endpoint, headers=headers, json=payload, timeout=30)
+                resp.raise_for_status()
+                sim_results = resp.json()
+                filtered = []
+                for rec, score in zip(records, sim_results if isinstance(sim_results, list) else []):
+                    try:
+                        s = float(score)
+                    except Exception:
+                        if isinstance(score, dict) and "score" in score:
+                            s = float(score["score"])
+                        else:
+                            s = 0.0
+                    if s >= float(similarity_threshold):
+                        filtered.append(rec)
+                records = filtered
+            except Exception as _sim_err:
+                print(f"Similarity endpoint filtering failed: {_sim_err}")
+
+        max_score = max(float(record["score"]) for record in records) if records else 0.0
+
         policies: List[ActivePolicy] = []
 
         for record in records:
@@ -394,6 +598,7 @@ def generate_answer(
     llm: ChatGroq,
     active_context: Sequence[ActivePolicy],
     user_question: str,
+    detected_language: str = "English",
 ) -> str:
     """Generate grounded response text from verified active policy context.
 
@@ -424,11 +629,24 @@ def generate_answer(
 
     prompt = PromptTemplate.from_template(
         """
-You are the Sentinel Banking Co-Pilot.
-Answer the user's question using ONLY the provided active_context.
-If the context is empty or does not contain the answer, you MUST reply with:
+The user's query is in {detected_language}. Use the provided English context to
+generate a precise, fact-strict compliance response in {detected_language}.
+You MUST include specific numbers (e.g., 10%, 20% TDS rates) and Document IDs
+(e.g., AUDIT-2026-Q1-RED) found in the context. Keep technical acronyms like
+'TDS' and 'KYC' in English for regulatory clarity.
+
+You are a Strict Compliance Auditor. Your job is to extract precise, verifiable
+regulatory facts from the provided English `active_context` and present them in
+{detected_language}. Focus specifically on numeric policy values such as TDS
+rates, liquidity ratios/percentages, thresholds, fines, and durations. Use
+ONLY the provided `active_context` (which is in English) to derive facts; do
+NOT hallucinate, estimate, or invent values.
+
+If the context does not contain the requested fact, reply exactly:
 "I cannot find a verified active policy for this in the current database."
-Always cite the document name.
+
+When returning numbers, include the source document name/ID for each extracted
+fact and preserve the original numeric formatting (e.g., "8.35%", "INR 50,000").
 
 active_context:
 {active_context}
@@ -442,6 +660,7 @@ user_question:
         formatted_prompt = prompt.format(
             active_context=context_text,
             user_question=user_question,
+            detected_language=detected_language,
         )
         response = llm.invoke(formatted_prompt)
         return str(response.content).strip()
@@ -511,14 +730,19 @@ def main() -> None:
                 print("Exiting Sentinel Co-Pilot.")
                 break
 
+            # Detect user's language (FastText preferred, langdetect fallback)
+            detected_language = detect_user_language(user_question)
+
+            # Symmetric multilingual embeddings: do not prefix the user query
             question_embedding = embeddings_model.embed_query(user_question)
+
             active_context = retrieve_active_policy(
                 driver,
                 user_question,
                 question_embedding,
                 top_k=5,
             )
-            answer = generate_answer(llm, active_context, user_question)
+            answer = generate_answer(llm, active_context, user_question, detected_language)
             print_response(answer, active_context)
     finally:
         driver.close()

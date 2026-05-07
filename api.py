@@ -19,9 +19,11 @@ Compliance posture:
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, wait
 import json
 import os
 import re
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List
 
@@ -41,6 +43,7 @@ from query_copilot import (
     build_embeddings_model,
     build_groq_llm,
     build_neo4j_driver,
+    detect_user_language,
     generate_answer,  # noqa: F401 – exported for external callers / testing
     load_environment,
     retrieve_active_policy,
@@ -74,6 +77,240 @@ _embeddings = None
 RBAC_DENIAL_MESSAGE = (
     "Access Denied: Your clearance level does not permit retrieval of confidential policy data."
 )
+
+FOLLOWUP_SUGGESTION_TIMEOUT_SECONDS = 2.5
+FOLLOWUP_SUGGESTION_LIMIT = 3
+
+
+def _collect_followup_topic_catalog(driver: Driver, user_tier: int, limit: int = 12) -> str:
+    """Build a compact catalog of answerable policy topics for follow-up generation."""
+
+    cypher_query = """
+    MATCH (p:Policy)
+    WHERE ($user_tier >= p.access_code)
+    OPTIONAL MATCH (p)-[:BELONGS_TO]->(c:Category)
+    OPTIONAL MATCH (p)-[:APPLIES_TO]->(ct:CustomerType)
+    OPTIONAL MATCH (p)-[:REQUIRES]->(dr:DocumentRequirement)
+    WITH coalesce(c.name, "General") AS category,
+         p.name AS document_name,
+         [item IN collect(DISTINCT ct.name) WHERE item IS NOT NULL] AS customer_types,
+         [item IN collect(DISTINCT dr.name) WHERE item IS NOT NULL] AS required_docs
+    RETURN category, document_name, customer_types, required_docs
+    ORDER BY category, document_name
+    LIMIT $limit
+    """
+
+    try:
+        with driver.session() as neo4j_session:
+            records = neo4j_session.execute_read(
+                lambda tx: list(
+                    tx.run(
+                        cypher_query,
+                        user_tier=user_tier,
+                        limit=limit,
+                    )
+                )
+            )
+    except (Neo4jError, ServiceUnavailable) as exc:
+        print(f"[WARNING] Could not build follow-up topic catalog: {exc}")
+        return ""
+
+    catalog_lines: List[str] = []
+    for record in records:
+        customer_types = [value for value in (record.get("customer_types") or []) if value]
+        required_docs = [value for value in (record.get("required_docs") or []) if value]
+        parts = [f"{record.get('document_name', 'Policy')} | Category: {record.get('category', 'General')}"]
+        if customer_types:
+            parts.append(f"Applies To: {', '.join(customer_types[:3])}")
+        if required_docs:
+            parts.append(f"Requires: {', '.join(required_docs[:3])}")
+        catalog_lines.append(" | ".join(parts))
+
+    return "\n".join(catalog_lines[:limit])
+
+
+def _parse_followup_suggestions(raw_text: str) -> List[str]:
+    """Parse an LLM suggestion payload into a clean de-duplicated list."""
+
+    cleaned_text = (raw_text or "").strip()
+    if not cleaned_text:
+        return []
+
+    if cleaned_text.startswith("```"):
+        cleaned_text = cleaned_text.split("\n", 1)[1] if "\n" in cleaned_text else cleaned_text
+        cleaned_text = cleaned_text.rsplit("```", 1)[0].strip()
+
+    candidates: List[str] = []
+    try:
+        parsed = json.loads(cleaned_text)
+        if isinstance(parsed, list):
+            for item in parsed:
+                if isinstance(item, str):
+                    candidates.append(item.strip())
+                elif isinstance(item, dict):
+                    for key in ("question", "suggestion", "text"):
+                        value = item.get(key)
+                        if isinstance(value, str):
+                            candidates.append(value.strip())
+                            break
+    except Exception:
+        pass
+
+    if not candidates:
+        for line in cleaned_text.splitlines():
+            candidate = re.sub(r"^[\-\*\d\)\.\s]+", "", line).strip()
+            if candidate:
+                candidates.append(candidate)
+
+    deduped: List[str] = []
+    seen = set()
+    for candidate in candidates:
+        normalized = candidate.strip()
+        if not normalized:
+            continue
+        key = normalized.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(normalized)
+
+    return deduped
+
+
+def _generate_followup_candidates(
+    llm,
+    user_question: str,
+    detected_language: str,
+    topic_catalog: str,
+) -> List[str]:
+    """Ask the LLM for answerable follow-up questions grounded in the catalog."""
+
+    system_content = (
+        f"The user's query is in {detected_language}. "
+        "You help internal bank employees rephrase a question when no direct match is found. "
+        "Use only the policy topics in the catalog. "
+        "Generate short follow-up questions that are likely answerable by the current policy graph. "
+        "Do not repeat the original question. Do not invent topics outside the catalog. "
+        "Return only a JSON array of strings and nothing else."
+    )
+    user_content = (
+        f"Original query: {user_question}\n\n"
+        f"Policy topic catalog:\n{topic_catalog}\n\n"
+        "Return 5 candidate follow-up questions as JSON."
+    )
+
+    response = llm.invoke(
+        [
+            SystemMessage(content=system_content),
+            HumanMessage(content=user_content),
+        ]
+    )
+    return _parse_followup_suggestions(str(response.content))[:5]
+
+
+def _validate_followup_suggestion(
+    driver: Driver,
+    embeddings,
+    suggestion: str,
+    user_tier: int,
+) -> str | None:
+    """Confirm that a candidate suggestion retrieves active policy evidence."""
+
+    normalized_suggestion = (suggestion or "").strip()
+    if not normalized_suggestion:
+        return None
+
+    try:
+        question_embedding = embeddings.embed_query(normalized_suggestion)
+        active_context = retrieve_active_policy(
+            driver,
+            normalized_suggestion,
+            question_embedding,
+            top_k=3,
+            user_tier=user_tier,
+            similarity_threshold=0.7,
+        )
+    except Exception as exc:
+        print(f"[WARNING] Follow-up validation failed for '{normalized_suggestion}': {exc}")
+        return None
+
+    return normalized_suggestion if active_context else None
+
+
+def _build_followup_suggestions(
+    driver: Driver,
+    llm,
+    embeddings,
+    user_question: str,
+    detected_language: str,
+    user_tier: int,
+) -> List[str]:
+    """Generate and validate answerable follow-up questions within a time budget."""
+
+    start_time = time.monotonic()
+    time_budget = FOLLOWUP_SUGGESTION_TIMEOUT_SECONDS
+
+    topic_catalog = _collect_followup_topic_catalog(driver, user_tier)
+    if not topic_catalog:
+        return []
+
+    try:
+        candidate_suggestions = _generate_followup_candidates(
+            llm,
+            user_question,
+            detected_language,
+            topic_catalog,
+        )
+    except Exception as exc:
+        print(f"[WARNING] Follow-up suggestion generation failed: {exc}")
+        return []
+
+    filtered_candidates: List[str] = []
+    seen = set()
+    for candidate in candidate_suggestions:
+        normalized = candidate.strip()
+        if not normalized:
+            continue
+        key = normalized.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        filtered_candidates.append(normalized)
+        if len(filtered_candidates) >= FOLLOWUP_SUGGESTION_LIMIT:
+            break
+
+    if not filtered_candidates:
+        return []
+
+    remaining_budget = time_budget - (time.monotonic() - start_time)
+    if remaining_budget <= 0:
+        return []
+
+    executor = ThreadPoolExecutor(max_workers=min(FOLLOWUP_SUGGESTION_LIMIT, len(filtered_candidates)))
+    try:
+        futures = [
+            executor.submit(
+                _validate_followup_suggestion,
+                driver,
+                embeddings,
+                suggestion,
+                user_tier,
+            )
+            for suggestion in filtered_candidates
+        ]
+
+        done, _ = wait(futures, timeout=remaining_budget)
+        validated: List[str] = []
+        for future in done:
+            try:
+                suggestion = future.result()
+            except Exception:
+                suggestion = None
+            if suggestion and suggestion not in validated:
+                validated.append(suggestion)
+        return validated[:FOLLOWUP_SUGGESTION_LIMIT]
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
 
 
 def _get_driver() -> Driver:
@@ -213,6 +450,7 @@ class ChatResponse(BaseModel):
     graph_edges: List[GraphEdge] = Field(default_factory=list)
     retrieval_tier: str = Field(default="no_match")
     sentinel_reasoning: str = Field(default="")
+    followup_suggestions: List[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def compute_match_confidence(self) -> "ChatResponse":
@@ -1012,6 +1250,7 @@ def _generate_with_history(
     user_question: str,
     history: List[Dict[str, str]],
     retrieval_tier: str | None = None,
+    detected_language: str = "English",
 ) -> tuple[str, str]:
     """Generate a grounded answer using active policies and session history.
 
@@ -1023,6 +1262,8 @@ def _generate_with_history(
         active_context: Retrieved active policy evidence set.
         user_question: Current user turn.
         history: Prior role/content messages for continuity.
+        retrieval_tier: Optional tier classification override.
+        detected_language: Detected language of user query (default: English).
 
     Returns:
         tuple[str, str]: Grounded assistant response and sentinel reasoning.
@@ -1057,6 +1298,10 @@ def _generate_with_history(
     system_content = (
         # This system directive encodes strict grounding policy to reduce
         # unsupported synthesis and strengthen retrieval-compliance guarantees.
+        # Multi-language aware: respond in the user's detected language.
+        f"The user's query is in {detected_language}. Use the provided English context to generate a precise, fact-strict compliance response in {detected_language}.\n"
+        f"You MUST include specific numbers (e.g., 10%, 20% TDS rates) and Document IDs found in the context.\n"
+        f"Keep technical acronyms like 'TDS' and 'KYC' in English for regulatory clarity.\n\n"
         "You are the Sentinel Banking Co-Pilot. "
         "Use ONLY the provided active_context and follow this tiered behavior. "
         f"retrieval_tier: {retrieval_tier}\n"
@@ -1244,6 +1489,7 @@ def chat(request: ChatRequest) -> ChatResponse:
     # keyword relevance with cosine-similarity vector search before governance
     # filtering for active policy truth.
     try:
+        # Embed raw user question (no E5-specific prefix for symmetric MiniLM)
         question_embedding = embeddings.embed_query(user_question)
     except Exception as exc:
         # Embedding failures (network, auth, model errors) should return a
@@ -1262,6 +1508,10 @@ def chat(request: ChatRequest) -> ChatResponse:
 
     # ── Step 3: Generate answer with retrieved context + conversation history ──
     retrieval_tier, sentinel_reasoning = _classify_context_tier(user_question, active_context)
+    classification_tier = retrieval_tier
+
+    # Detect user's language for multilingual response
+    detected_language = detect_user_language(user_question)
 
     if user_tier != 1 and not active_context:
         answer = RBAC_DENIAL_MESSAGE
@@ -1274,7 +1524,22 @@ def chat(request: ChatRequest) -> ChatResponse:
             user_question,
             history,
             retrieval_tier=retrieval_tier,
+            detected_language=detected_language,
         )
+
+    followup_suggestions: List[str] = []
+    if classification_tier == "no_match":
+        try:
+            followup_suggestions = _build_followup_suggestions(
+                driver,
+                llm,
+                embeddings,
+                user_question,
+                detected_language,
+                user_tier,
+            )
+        except Exception as exc:
+            print(f"[WARNING] Follow-up suggestion path failed safely: {exc}")
 
     # ── Step 4: Build citation list for the client ─────────────────────────────
     citations = [
@@ -1315,6 +1580,7 @@ def chat(request: ChatRequest) -> ChatResponse:
         graph_edges=graph_edges,
         retrieval_tier=retrieval_tier,
         sentinel_reasoning=sentinel_reasoning,
+        followup_suggestions=followup_suggestions,
     )
 
 
