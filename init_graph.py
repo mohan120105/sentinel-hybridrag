@@ -421,8 +421,13 @@ def build_embeddings_model() -> Any:
     space_name = os.getenv("HF_EMBEDDING_SPACE", "mohan1201/sentinel-embedding-server")
     client = Client(space_name)
 
+    api_name_env = os.getenv("HF_EMBEDDING_API_NAME", "")
+    api_name = api_name_env.lstrip('/') if api_name_env else None
+
     def get_embedding(text: str):
-        return client.predict(text, api_name="/predict")
+        if api_name:
+            return client.predict(text, api_name=api_name)
+        return client.predict(text)
 
     class _GradioSpaceEmbeddings:
         def embed_query(self, text: str):

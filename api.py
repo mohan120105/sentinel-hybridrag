@@ -1115,7 +1115,7 @@ def _ingest_graph_action_to_neo4j(
     # Embedding full rule plus provenance text improves downstream retrieval
     # recall while preserving evidence lineage for compliance review.
     semantic_text = f"{action.extracted_rule}\n\n{source_text}"
-    embedding = [float(value) for value in embeddings_model.embed_query(semantic_text)]
+    embedding = [float(value) for value in embeddings_model.embed_query(f"passage: {semantic_text}")]
     timestamp = datetime.utcnow().isoformat()
 
     with _get_driver().session() as session:
