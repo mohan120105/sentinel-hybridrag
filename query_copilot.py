@@ -336,7 +336,7 @@ def retrieve_active_policy(
     top_k: int = 5,
     only_latest: bool = True,
     user_tier: int = 1,
-    similarity_threshold: float = 0.75,
+    similarity_threshold: float = 0.5,
 ) -> List[ActivePolicy]:
     """Retrieve active policies with vector search and governance filtering.
 
