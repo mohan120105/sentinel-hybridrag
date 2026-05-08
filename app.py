@@ -455,7 +455,7 @@ def render_copilot_retrieval() -> None:
 
                 # Detect language, embed, retrieve, then generate answer in detected language
                 detected_language = detect_user_language(user_question)
-                question_embedding = embeddings_model.embed_query(user_question)
+                question_embedding = embeddings_model.embed_query(f"query: {user_question}")
                 active_context = retrieve_active_policy(
                     driver,
                     user_question,

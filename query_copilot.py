@@ -1,72 +1,11 @@
-"""Sentinel: Retrieval and Grounded Generation Core for Active Policy Q&A.
-    try:
-        from langchain_community.embeddings import HuggingFaceInferenceAPIEmbeddings
-        try:
-            return HuggingFaceInferenceAPIEmbeddings(huggingfacehub_api_token=hf_token, model_name=model_name)
-        except TypeError:
-            return HuggingFaceInferenceAPIEmbeddings(api_key=hf_token, model_name=model_name)
-    except Exception:
-        # langchain_community may not be installed in lightweight deploys. Avoid
-        # falling back to local transformer-based models (which load large
-        # weights into process memory) unless the operator explicitly requests
-        # `HF_EMBEDDING_LOCAL=true`. Instead, provide a tiny remote-backed
-        # wrapper that calls the Hugging Face Inference embeddings endpoint
-        # over HTTP using the provided `HF_TOKEN` so we don't load heavy libs.
-        class _HFInferenceWrapper:
-            def __init__(self, model_name: str, hf_token: str, base_url: str = "https://api-inference.huggingface.co"):
-                self.model_name = model_name
-                self.api_url = f"{base_url.rstrip('/')}/embeddings/{model_name}"
-                self.headers = {"Authorization": f"Bearer {hf_token}", "Content-Type": "application/json"}
-
-            def embed_query(self, text: str):
-                import requests
-                import time
-
-                payload = {"inputs": text}
-                last_exc = None
-                for attempt in range(3):
-                    try:
-                        resp = requests.post(self.api_url, headers=self.headers, json=payload, timeout=15)
-                        resp.raise_for_status()
-                        data = resp.json()
-                        break
-                    except Exception as exc:
-                        last_exc = exc
-                        print(f"[WARNING] HF embeddings request attempt {attempt+1} failed: {exc}")
-                        if attempt < 2:
-                            time.sleep(1 + attempt * 2)
-                            continue
-                        raise RuntimeError(f"Hugging Face embeddings request failed after retries: {exc}")
-                # Accept several plausible response shapes from HF Inference.
-                if isinstance(data, dict):
-                    if "embeddings" in data:
-                        return data["embeddings"]
-                    if "embedding" in data:
-                        return data["embedding"]
-                    if "data" in data and isinstance(data["data"], list) and data["data"]:
-                        first = data["data"][0]
-                        if isinstance(first, dict) and "embedding" in first:
-                            return first["embedding"]
-                if isinstance(data, list) and data:
-                    first = data[0]
-                    if isinstance(first, dict) and "embedding" in first:
-                        return first["embedding"]
-                    if isinstance(first, list):
-                        return first
-                raise ValueError(f"Unexpected HF embeddings response: {data}")
-
-        print("langchain_community not available; using lightweight HF Inference wrapper (remote).")
-        return _HFInferenceWrapper(model_name, hf_token)
-    retrieval preparation.
-"""
+"""Sentinel: Retrieval and Grounded Generation Core for Active Policy Q&A."""
 
 from __future__ import annotations
 
 import os
-from typing import List, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 
 from dotenv import find_dotenv, load_dotenv
-from typing import Optional
 from langchain_core.prompts import PromptTemplate
 from langchain_groq import ChatGroq
 from neo4j import Driver
@@ -76,8 +15,6 @@ from pydantic import BaseModel, Field
 
 from connect import build_neo4j_driver as _build_neo4j_driver_from_connect
 
-import pathlib
-
 # Default model lookup paths (env override supported)
 FASTTEXT_MODEL_ENV = os.getenv("FASTTEXT_LANG_MODEL")
 DEFAULT_FASTTEXT_PATHS = [
@@ -86,7 +23,7 @@ DEFAULT_FASTTEXT_PATHS = [
     os.path.join(os.path.dirname(__file__), "lid.176.bin"),
 ]
 
-# Minimal ISO code -> language name mapping (extend as needed)
+# Minimal ISO code -> language name mapping
 LANG_CODE_TO_NAME = {
     "en": "English",
     "hi": "Hindi",
@@ -107,64 +44,51 @@ LANG_CODE_TO_NAME = {
     "ur": "Urdu",
 }
 
-_FASTTEXT_MODEL: any = None
+_FASTTEXT_MODEL: Any = None
+
 
 def _find_fasttext_model() -> str | None:
-    """Return path to a FastText model if found, otherwise None.
+    """Return path to FastText model if present, else None."""
 
-    Accept common compressed (.ftz) and uncompressed (.bin) filenames.
-    """
     candidates: list[str] = []
-    for p in DEFAULT_FASTTEXT_PATHS:
-        if not p:
+    for model_path in DEFAULT_FASTTEXT_PATHS:
+        if not model_path:
             continue
-        path = pathlib.Path(p)
-        candidates.append(str(path))
-        # If no suffix provided, try common extensions
-        if path.suffix == "":
-            candidates.append(str(path.with_suffix(".bin")))
-            candidates.append(str(path.with_suffix(".ftz")))
-        else:
-            suf = path.suffix.lower()
-            if suf == ".bin":
-                candidates.append(str(path.with_suffix(".ftz")))
-            elif suf == ".ftz":
-                candidates.append(str(path.with_suffix(".bin")))
+        candidates.append(model_path)
+        root, ext = os.path.splitext(model_path)
+        if not ext:
+            candidates.append(root + ".bin")
+            candidates.append(root + ".ftz")
+        elif ext.lower() == ".bin":
+            candidates.append(root + ".ftz")
+        elif ext.lower() == ".ftz":
+            candidates.append(root + ".bin")
 
-    # Return first existing candidate
-    for c in candidates:
-        try:
-            pth = pathlib.Path(c)
-            if pth.exists() and pth.is_file():
-                return str(pth)
-        except Exception:
-            continue
+    for candidate in candidates:
+        if os.path.isfile(candidate):
+            return candidate
     return None
 
 
 def ensure_fasttext_model() -> str | None:
-    """Ensure a FastText model exists and load it. Returns model path or None.
+    """Load FastText model if available and return its resolved path."""
 
-    If the model is missing, this function does not attempt to download it
-    automatically but returns None so the caller can present instructions.
-    """
     global _FASTTEXT_MODEL
     if _FASTTEXT_MODEL is not None:
-        return _FASTTEXT_MODEL
+        return _find_fasttext_model()
 
     model_path = _find_fasttext_model()
-    try:
-        import fasttext as _fasttext  # type: ignore
-    except ImportError:
+    if not model_path:
         return None
 
-    if model_path:
-        try:
-            _FASTTEXT_MODEL = _fasttext.load_model(model_path)  # type: ignore
-            return model_path
-        except Exception:
-            return None
-    return None
+    try:
+        import fasttext as _fasttext  # type: ignore
+
+        _FASTTEXT_MODEL = _fasttext.load_model(model_path)  # type: ignore
+        return model_path
+    except Exception:
+        _FASTTEXT_MODEL = None
+        return None
 
 
 
@@ -354,74 +278,31 @@ def build_groq_llm() -> ChatGroq:
 
 
 def build_embeddings_model():
-    """Build cloud-hosted sentence-transformer embeddings client.
+    """Build a Gradio Space-backed embeddings client.
 
-    Returns:
-        HuggingFaceEndpointEmbeddings: Embedding client for query vectorization.
+    The returned object exposes `embed_query(text)` so the rest of the
+    retrieval pipeline can stay unchanged.
     """
-    # Prefer paraphrase-multilingual-MiniLM-L12-v2 for symmetric multilingual embeddings.
-    model_name = os.getenv(
-        "HF_EMBEDDING_MODEL",
-        "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
-    )
-    use_local = os.getenv("HF_EMBEDDING_LOCAL", "false").lower() in {"1", "true", "yes"}
 
-    if use_local:
-        # Use local HuggingFace model through langchain_huggingface
-        from langchain_huggingface import HuggingFaceEmbeddings
+    from gradio_client import Client
 
-        return HuggingFaceEmbeddings(model_name=model_name)
+    space_name = os.getenv("HF_EMBEDDING_SPACE", "mohan1201/sentinel-embedding-server")
+    client = Client(space_name)
 
-    hf_token = os.getenv("HF_TOKEN")
-    if not hf_token:
-        raise ValueError("HF_TOKEN is not set. Export it or set HF_EMBEDDING_LOCAL=true.")
+    def get_embedding(text: str):
+        return client.predict(text, api_name="/predict")
 
-    try:
-        from langchain_community.embeddings import HuggingFaceInferenceAPIEmbeddings
-        try:
-            return HuggingFaceInferenceAPIEmbeddings(huggingfacehub_api_token=hf_token, model_name=model_name)
-        except TypeError:
-            return HuggingFaceInferenceAPIEmbeddings(api_key=hf_token, model_name=model_name)
-    except Exception:
-        # langchain_community may not be installed in lightweight deploys. Avoid
-        # falling back to local transformer-based models (which load large
-        # weights into process memory) unless the operator explicitly requests
-        # `HF_EMBEDDING_LOCAL=true`. Instead, provide a tiny remote-backed
-        # wrapper that calls the Hugging Face Inference embeddings endpoint
-        # over HTTP using the provided `HF_TOKEN` so we don't load heavy libs.
-        class _HFInferenceWrapper:
-            def __init__(self, model_name: str, hf_token: str, base_url: str = "https://api-inference.huggingface.co"):
-                self.model_name = model_name
-                self.api_url = f"{base_url.rstrip('/')}/embeddings/{model_name}"
-                self.headers = {"Authorization": f"Bearer {hf_token}", "Content-Type": "application/json"}
+    class _GradioSpaceEmbeddings:
+        def embed_query(self, text: str):
+            result = get_embedding(text)
+            if isinstance(result, list):
+                if result and isinstance(result[0], (int, float)):
+                    return result
+                if result and isinstance(result[0], list):
+                    return result[0]
+            return result
 
-            def embed_query(self, text: str):
-                import requests
-
-                payload = {"inputs": text}
-                resp = requests.post(self.api_url, headers=self.headers, json=payload, timeout=30)
-                resp.raise_for_status()
-                data = resp.json()
-                # Accept several plausible response shapes from HF Inference.
-                if isinstance(data, dict):
-                    if "embeddings" in data:
-                        return data["embeddings"]
-                    if "embedding" in data:
-                        return data["embedding"]
-                    if "data" in data and isinstance(data["data"], list) and data["data"]:
-                        first = data["data"][0]
-                        if isinstance(first, dict) and "embedding" in first:
-                            return first["embedding"]
-                if isinstance(data, list) and data:
-                    first = data[0]
-                    if isinstance(first, dict) and "embedding" in first:
-                        return first["embedding"]
-                    if isinstance(first, list):
-                        return first
-                raise ValueError(f"Unexpected HF embeddings response: {data}")
-
-        print("langchain_community not available; using lightweight HF Inference wrapper (remote).")
-        return _HFInferenceWrapper(model_name, hf_token)
+    return _GradioSpaceEmbeddings()
 
 
 def retrieve_active_policy(
@@ -431,7 +312,7 @@ def retrieve_active_policy(
     top_k: int = 5,
     only_latest: bool = True,
     user_tier: int = 1,
-    similarity_threshold: float = 0.7,
+    similarity_threshold: float = 0.75,
 ) -> List[ActivePolicy]:
     """Retrieve active policies with vector search and governance filtering.
 
@@ -699,8 +580,10 @@ def generate_answer(
 
     prompt = PromptTemplate.from_template(
         """
-The user's query is in {detected_language}. Use the provided English context to
-generate a precise, fact-strict compliance response in {detected_language}.
+The user's query is in {detected_language}. You MUST answer only in
+{detected_language}; do not switch languages mid-response.
+Use the provided English context to generate a precise, Fact-Strict compliance
+response in {detected_language}.
 You MUST include specific numbers (e.g., 10%, 20% TDS rates) and Document IDs
 (e.g., AUDIT-2026-Q1-RED) found in the context. Keep technical acronyms like
 'TDS' and 'KYC' in English for regulatory clarity.
@@ -803,14 +686,14 @@ def main() -> None:
             # Detect user's language (FastText preferred, langdetect fallback)
             detected_language = detect_user_language(user_question)
 
-            # Symmetric multilingual embeddings: do not prefix the user query
-            question_embedding = embeddings_model.embed_query(user_question)
+            question_embedding = embeddings_model.embed_query(f"query: {user_question}")
 
             active_context = retrieve_active_policy(
                 driver,
                 user_question,
                 question_embedding,
                 top_k=5,
+                similarity_threshold=0.75,
             )
             answer = generate_answer(llm, active_context, user_question, detected_language)
             print_response(answer, active_context)

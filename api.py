@@ -222,14 +222,14 @@ def _validate_followup_suggestion(
         return None
 
     try:
-        question_embedding = embeddings.embed_query(normalized_suggestion)
+        question_embedding = embeddings.embed_query(f"query: {normalized_suggestion}")
         active_context = retrieve_active_policy(
             driver,
             normalized_suggestion,
             question_embedding,
             top_k=3,
             user_tier=user_tier,
-            similarity_threshold=0.7,
+            similarity_threshold=0.75,
         )
     except Exception as exc:
         print(f"[WARNING] Follow-up validation failed for '{normalized_suggestion}': {exc}")
@@ -1490,8 +1490,7 @@ def chat(request: ChatRequest) -> ChatResponse:
     # keyword relevance with cosine-similarity vector search before governance
     # filtering for active policy truth.
     try:
-        # Embed raw user question (no E5-specific prefix for symmetric MiniLM)
-        question_embedding = embeddings.embed_query(user_question)
+        question_embedding = embeddings.embed_query(f"query: {user_question}")
     except Exception as exc:
         # Embedding failures (network, auth, model errors) should return a
         # controlled 503 to the client rather than raising an uncaught 500.
