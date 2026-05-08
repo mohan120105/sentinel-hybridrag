@@ -88,7 +88,7 @@ def _collect_followup_topic_catalog(driver: Driver, user_tier: int, limit: int =
 
     cypher_query = """
     MATCH (p:Policy)
-    WHERE ($user_tier <= p.access_code)
+    WHERE ($user_tier = 1 OR p.access_code = 2)
     OPTIONAL MATCH (p)-[:BELONGS_TO]->(c:Category)
     OPTIONAL MATCH (p)-[:APPLIES_TO]->(ct:CustomerType)
     OPTIONAL MATCH (p)-[:REQUIRES]->(dr:DocumentRequirement)

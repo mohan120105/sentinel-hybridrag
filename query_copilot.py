@@ -366,7 +366,7 @@ def retrieve_active_policy(
             FOR qe
             LIMIT $top_k
         ) SCORE AS vector_score
-        WHERE ($user_tier <= p.access_code) AND vector_score > $similarity_threshold
+        WHERE ($user_tier = 1 OR p.access_code = 2) AND vector_score > $similarity_threshold
         RETURN p, vector_score, 0.0 AS text_score
 
         UNION ALL
@@ -374,7 +374,7 @@ def retrieve_active_policy(
         WITH $user_question AS uq, $top_k AS tk
         CALL db.index.fulltext.queryNodes('policy_keywords', uq, {limit: tk})
         YIELD node AS p, score AS raw_text_score
-        WHERE ($user_tier <= p.access_code)
+        WHERE ($user_tier = 1 OR p.access_code = 2)
         RETURN p, 0.0 AS vector_score, raw_text_score AS text_score
     }
     // 1. Score Fusion
@@ -417,7 +417,7 @@ def retrieve_active_policy(
         FOR $question_embedding
         LIMIT $top_k
     ) SCORE AS score
-    WHERE ($user_tier <= p.access_code) AND score > $similarity_threshold
+    WHERE ($user_tier = 1 OR p.access_code = 2) AND score > $similarity_threshold
     OPTIONAL MATCH (superseder)-[supersedes_rel]->(p)
     WHERE type(supersedes_rel) = 'SUPERSEDES'
     WITH p, score, count(supersedes_rel) AS supersedes_count, $only_latest AS only_latest
