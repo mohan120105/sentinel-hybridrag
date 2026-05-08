@@ -433,30 +433,6 @@ def build_embeddings_model() -> Any:
     if not hf_token:
         raise ValueError("HF_TOKEN is not set. Export it or set HF_EMBEDDING_LOCAL=true.")
 
-<<<<<<< HEAD
-    # Support both older and newer constructor signatures.
-    try:
-        from langchain_community.embeddings import HuggingFaceInferenceAPIEmbeddings
-    except ModuleNotFoundError:
-        from langchain_huggingface import HuggingFaceEmbeddings
-
-        print(
-            "langchain_community is unavailable; falling back to local "
-            "HuggingFaceEmbeddings."
-        )
-        return HuggingFaceEmbeddings(model_name=model_name)
-
-    try:
-        return HuggingFaceInferenceAPIEmbeddings(
-            api_key=hf_token,
-            model_name=model_name,
-        )
-    except TypeError:
-        return HuggingFaceInferenceAPIEmbeddings(
-            huggingfacehub_api_token=hf_token,
-            model_name=model_name,
-        )
-=======
     # Prefer the langchain_community HF inference client when available;
     # otherwise fall back to a tiny remote-backed wrapper that calls the
     # Hugging Face Inference embeddings endpoint directly. This avoids loading
@@ -500,7 +476,6 @@ def build_embeddings_model() -> Any:
 
         print("langchain_community not available; using lightweight HF Inference wrapper (remote).")
         return _HFInferenceWrapper(model_name, hf_token)
->>>>>>> 352bff2 (fix: avoid local HF model fallback; use lightweight HF Inference wrapper (remote) to reduce memory)
 
 
 def verify_embedding_api_connectivity(embeddings_model: Any) -> None:

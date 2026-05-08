@@ -366,18 +366,6 @@ def build_embeddings_model():
 
     try:
         from langchain_community.embeddings import HuggingFaceInferenceAPIEmbeddings
-<<<<<<< HEAD
-    except ModuleNotFoundError:
-        from langchain_huggingface import HuggingFaceEmbeddings
-
-        print("langchain_community is unavailable; falling back to local HuggingFaceEmbeddings.")
-        return HuggingFaceEmbeddings(model_name=model_name)
-
-    try:
-        return HuggingFaceInferenceAPIEmbeddings(huggingfacehub_api_token=hf_token, model_name=model_name)
-    except TypeError:
-        return HuggingFaceInferenceAPIEmbeddings(api_key=hf_token, model_name=model_name)
-=======
         try:
             return HuggingFaceInferenceAPIEmbeddings(huggingfacehub_api_token=hf_token, model_name=model_name)
         except TypeError:
@@ -422,7 +410,6 @@ def build_embeddings_model():
 
         print("langchain_community not available; using lightweight HF Inference wrapper (remote).")
         return _HFInferenceWrapper(model_name, hf_token)
->>>>>>> 352bff2 (fix: avoid local HF model fallback; use lightweight HF Inference wrapper (remote) to reduce memory)
 
 
 def retrieve_active_policy(
