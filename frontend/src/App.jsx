@@ -12,7 +12,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import CitationMap from './CitationMap'
 import {
   Send,
   Sparkles,
@@ -27,6 +26,8 @@ import {
   Database,
   Upload,
   FileText,
+  ExternalLink,
+  FolderOpen,
 } from 'lucide-react'
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -194,7 +195,7 @@ function AccessGate({ employeeIdDraft, onEmployeeIdDraftChange, onSubmit }) {
 }
 
 /** Collapsible citations / evidence snapshot panel. */
-function CitationsPanel({ citations }) {
+function CitationsPanel({ citations, onOpenCitation }) {
   const [open, setOpen] = useState(false)
   if (!citations || citations.length === 0) return null
 
@@ -261,6 +262,14 @@ function CitationsPanel({ citations }) {
                 </div>
                 <p className="text-xs text-gray-500 mt-0.5">{c.category}</p>
               </div>
+              <button
+                type="button"
+                onClick={() => onOpenCitation?.(c.document_name)}
+                className="inline-flex items-center gap-1 rounded-lg border border-gray-600 px-2 py-1 text-[11px] text-gray-300 hover:border-blue-500 hover:text-blue-300 transition-colors"
+              >
+                <ExternalLink size={11} />
+                View
+              </button>
             </div>
           ))}
         </div>
@@ -270,7 +279,7 @@ function CitationsPanel({ citations }) {
 }
 
 /** A single chat bubble (user or assistant). */
-function MessageBubble({ message, index, onAskSME }) {
+function MessageBubble({ message, index, onAskSME, onOpenCitation }) {
   const isUser = message.role === 'user'
 
   if (isUser) {
@@ -346,8 +355,7 @@ function MessageBubble({ message, index, onAskSME }) {
           </ReactMarkdown>
         </div>
 
-        <CitationsPanel citations={message.citations} />
-        <CitationMap graph={message.graph} />
+        <CitationsPanel citations={message.citations} onOpenCitation={onOpenCitation} />
             {Array.isArray(message.followup_suggestions) && message.followup_suggestions.length > 0 ? (
               <div className="mt-3 rounded-2xl border border-blue-700/40 bg-blue-950/30 px-3 py-3">
                 <p className="text-[11px] uppercase tracking-[0.24em] text-blue-300">
@@ -376,6 +384,81 @@ function MessageBubble({ message, index, onAskSME }) {
               <Mail size={12} />
               <span>Ask SME for Clarity</span>
             </button>
+      </div>
+    </div>
+  )
+}
+
+function PolicyRepositoryView({
+  employeeId,
+  policies,
+  isPoliciesLoading,
+  policyError,
+  onOpenPolicy,
+}) {
+  return (
+    <div className="h-full overflow-y-auto px-6 py-6">
+      <div className="max-w-3xl mx-auto space-y-6">
+        <div className="rounded-3xl border border-gray-700 bg-gray-800/70 backdrop-blur-sm p-6 shadow-[0_0_0_1px_rgba(255,255,255,0.02)]">
+          <div className="flex items-start gap-4 mb-4">
+            <div className="w-12 h-12 rounded-2xl bg-blue-900/40 border border-blue-700/40 flex items-center justify-center flex-shrink-0">
+              <FolderOpen size={22} className="text-blue-400" />
+            </div>
+            <div>
+              <h2 className="text-xl font-semibold text-gray-100">Policy Repository</h2>
+              <p className="text-sm text-gray-400 mt-1 leading-relaxed">
+                Browse only the policy PDFs your access tier can view. Documents open through the secured API proxy.
+              </p>
+            </div>
+          </div>
+
+          <div className="text-xs text-gray-500">
+            Signed in as {employeeId}. Visibility is enforced by backend access_code checks.
+          </div>
+        </div>
+
+        <div className="rounded-3xl border border-gray-700 bg-gray-800/70 backdrop-blur-sm p-4">
+          {isPoliciesLoading && (
+            <div className="rounded-2xl border border-gray-700 bg-gray-900/70 px-4 py-3 text-sm text-gray-300">
+              Loading authorized policies...
+            </div>
+          )}
+
+          {!isPoliciesLoading && policyError && (
+            <div className="rounded-2xl border border-red-800/60 bg-red-950/40 px-4 py-3 text-sm text-red-200">
+              {policyError}
+            </div>
+          )}
+
+          {!isPoliciesLoading && !policyError && policies.length === 0 && (
+            <div className="rounded-2xl border border-gray-700 bg-gray-900/70 px-4 py-3 text-sm text-gray-400">
+              No policy PDFs are visible for your current access tier.
+            </div>
+          )}
+
+          {!isPoliciesLoading && !policyError && policies.length > 0 && (
+            <div className="divide-y divide-gray-700">
+              {policies.map((item) => (
+                <div key={item.file_name} className="flex items-center justify-between gap-3 px-2 py-3">
+                  <div>
+                    <p className="text-sm font-medium text-gray-100">{item.file_name}</p>
+                    <p className="text-xs text-gray-500 mt-0.5">
+                      {item.access_code === 1 ? 'Confidential (1)' : 'General (2)'}
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => onOpenPolicy?.(item.file_name)}
+                    className="inline-flex items-center gap-1.5 rounded-xl border border-gray-600 px-3 py-1.5 text-xs text-gray-200 hover:border-blue-500 hover:text-blue-300 transition-colors"
+                  >
+                    <ExternalLink size={13} />
+                    Open PDF
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
       </div>
     </div>
   )
@@ -590,6 +673,9 @@ export default function App() {
   const [uploadStatus, setUploadStatus] = useState('idle')
   const [uploadResult, setUploadResult] = useState(null)
   const [isHistoryLoading, setIsHistoryLoading] = useState(false)
+  const [policies, setPolicies] = useState([])
+  const [isPoliciesLoading, setIsPoliciesLoading] = useState(false)
+  const [policyError, setPolicyError] = useState(null)
 
   const messagesEndRef = useRef(null)
   const inputRef = useRef(null)
@@ -658,6 +744,62 @@ export default function App() {
     }
   }, [activeTab, canIngest])
 
+  const openPolicyByFileName = useCallback(
+    (fileName) => {
+      if (!fileName || !employeeId) return
+      const encoded = encodeURIComponent(String(fileName))
+      const url = `${API_BASE}/api/v1/policies/view/${encoded}?employee_id=${encodeURIComponent(employeeId)}`
+      try {
+        window.open(url, '_blank', 'noopener,noreferrer')
+      } catch (error) {
+        console.error('Failed to open policy PDF:', error)
+      }
+    },
+    [employeeId]
+  )
+
+  const loadPolicies = useCallback(
+    async (activeEmployeeId) => {
+      if (!activeEmployeeId) {
+        setPolicies([])
+        return
+      }
+
+      setIsPoliciesLoading(true)
+      setPolicyError(null)
+      try {
+        const res = await fetch(
+          `${API_BASE}/api/v1/policies?employee_id=${encodeURIComponent(activeEmployeeId)}`,
+          {
+            headers: {
+              'X-Employee-Id': activeEmployeeId,
+            },
+          }
+        )
+
+        if (!res.ok) {
+          const errText = await res.text()
+          throw new Error(`HTTP ${res.status}: ${errText}`)
+        }
+
+        const data = await res.json()
+        setPolicies(Array.isArray(data) ? data : [])
+      } catch (err) {
+        console.error('Failed to load policy repository:', err)
+        setPolicies([])
+        setPolicyError('Could not load policy repository from secure backend.')
+      } finally {
+        setIsPoliciesLoading(false)
+      }
+    },
+    []
+  )
+
+  useEffect(() => {
+    if (activeTab !== 'policies') return
+    loadPolicies(employeeId)
+  }, [activeTab, employeeId, loadPolicies])
+
   const handleEmployeeLogin = useCallback(
     (e) => {
       e?.preventDefault()
@@ -681,6 +823,9 @@ export default function App() {
       setUploadStatus('idle')
       setUploadResult(null)
       setIsHistoryLoading(false)
+      setPolicies([])
+      setIsPoliciesLoading(false)
+      setPolicyError(null)
 
       if (typeof window !== 'undefined') {
         window.localStorage.setItem('sentinel_employee_id', normalized)
@@ -715,6 +860,9 @@ export default function App() {
     setUploadStatus('idle')
     setUploadResult(null)
     setIsHistoryLoading(false)
+    setPolicies([])
+    setIsPoliciesLoading(false)
+    setPolicyError(null)
 
     if (typeof window !== 'undefined') {
       window.localStorage.removeItem('sentinel_employee_id')
@@ -1206,6 +1354,16 @@ export default function App() {
               >
                 Co-Pilot (Chat)
               </button>
+              <button
+                onClick={() => setActiveTab('policies')}
+                className={`pb-3 text-sm font-medium transition-colors border-b-2 ${
+                  activeTab === 'policies'
+                    ? 'text-blue-400 border-blue-400'
+                    : 'text-gray-400 border-transparent hover:text-gray-200'
+                }`}
+              >
+                Policy Repository
+              </button>
               {canIngest && (
                 <button
                   onClick={() => setActiveTab('ingest')}
@@ -1224,18 +1382,22 @@ export default function App() {
           <header className="flex items-center justify-between px-6 py-3.5 border-t border-gray-700/40">
             <div>
               <p className="text-xs text-gray-500">
-                {activeTab === 'chat' ? 'Session' : 'Ingestion Target'}
+                {activeTab === 'chat' ? 'Session' : activeTab === 'ingest' ? 'Ingestion Target' : 'Repository'}
               </p>
               <p
                 className="text-xs font-mono text-gray-400 mt-0.5"
                 title={
                   activeTab === 'chat'
                     ? `${getCurrentSessionName()} (${currentSession})`
+                    : activeTab === 'policies'
+                      ? `${policies.length} accessible policy PDFs`
                     : selectedFile?.name || 'No file selected'
                 }
               >
                 {activeTab === 'chat'
                   ? truncateSessionName(getCurrentSessionName())
+                  : activeTab === 'policies'
+                    ? `${policies.length} accessible policy PDFs`
                   : selectedFile?.name || 'No file selected'}
               </p>
               <p className="mt-1 text-[11px] text-gray-500">
@@ -1274,6 +1436,7 @@ export default function App() {
                       message={msg}
                       index={idx}
                       onAskSME={handleAskSME}
+                      onOpenCitation={openPolicyByFileName}
                     />
                   ))}
                   {isLoading && <ThinkingIndicator />}
@@ -1369,6 +1532,14 @@ export default function App() {
               </p>
             </div>
           </>
+        ) : activeTab === 'policies' ? (
+          <PolicyRepositoryView
+            employeeId={employeeId}
+            policies={policies}
+            isPoliciesLoading={isPoliciesLoading}
+            policyError={policyError}
+            onOpenPolicy={openPolicyByFileName}
+          />
         ) : (
           <IngestionView
             selectedFile={selectedFile}

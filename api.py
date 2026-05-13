@@ -20,6 +20,7 @@ Compliance posture:
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, wait
+import base64
 import json
 import os
 import re
@@ -28,14 +29,16 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List
 
 from dotenv import find_dotenv, load_dotenv
-from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
+from fastapi import FastAPI, File, Form, Header, HTTPException, Query, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from init_graph import CATEGORY_VALUES, GraphAction
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from neo4j import Driver, ManagedTransaction
 from neo4j.exceptions import Neo4jError, ServiceUnavailable
 from pydantic import BaseModel, Field, ValidationError, model_validator
+import requests
 
 from query_copilot import (
     ActivePolicy,
@@ -81,6 +84,15 @@ RBAC_DENIAL_MESSAGE = (
 FOLLOWUP_SUGGESTION_TIMEOUT_SECONDS = 2.5
 FOLLOWUP_SUGGESTION_LIMIT = 3
 ENABLE_FOLLOWUP_SUGGESTIONS = os.getenv("ENABLE_FOLLOWUP_SUGGESTIONS", "false").lower() in {"1", "true", "yes"}
+
+GITHUB_API_BASE = "https://api.github.com"
+GITHUB_REPO = os.getenv("GITHUB_REPO", "").strip()
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "").strip()
+GITHUB_DOCS_ROOT = os.getenv("GITHUB_DOCS_ROOT", "hackathon-docs").strip().strip("/")
+GITHUB_POLICY_MANIFEST_PATH = os.getenv(
+    "GITHUB_POLICY_MANIFEST_PATH",
+    f"{GITHUB_DOCS_ROOT}/policy_access_manifest.json",
+).strip().strip("/")
 
 
 def _collect_followup_topic_catalog(driver: Driver, user_tier: int, limit: int = 12) -> str:
@@ -509,6 +521,11 @@ class SessionMessage(BaseModel):
     sentinel_reasoning: str | None = None
 
 
+class PolicyRepositoryItem(BaseModel):
+    file_name: str
+    access_code: int
+
+
 def _build_evidence_graph(
     active_context: List[ActivePolicy],
 ) -> tuple[List[GraphNode], List[GraphEdge]]:
@@ -543,6 +560,166 @@ def _build_evidence_graph(
             graph_edges.append(GraphEdge(source=source, target=target, label=label))
 
     return graph_nodes, graph_edges
+
+
+def _validate_github_config() -> None:
+    if not GITHUB_REPO or not GITHUB_TOKEN:
+        raise HTTPException(
+            status_code=500,
+            detail="GitHub policy proxy is not configured. Set GITHUB_REPO and GITHUB_TOKEN.",
+        )
+
+
+def _github_headers(*, accept: str = "application/vnd.github+json") -> Dict[str, str]:
+    return {
+        "Authorization": f"Bearer {GITHUB_TOKEN}",
+        "Accept": accept,
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+
+
+def _normalize_policy_key(value: str) -> str:
+    return (value or "").strip().replace("\\", "/").lower()
+
+
+def _sanitize_policy_request_path(file_name: str) -> str:
+    candidate = (file_name or "").strip().replace("\\", "/")
+    if not candidate:
+        raise HTTPException(status_code=422, detail="file_name must not be empty.")
+    if candidate.startswith("/") or ".." in candidate.split("/"):
+        raise HTTPException(status_code=400, detail="Invalid file_name path.")
+    return candidate
+
+
+def _extract_employee_id(
+    employee_id: str | None,
+    x_employee_id: str | None,
+) -> str:
+    resolved = (employee_id or x_employee_id or "").strip()
+    if not resolved:
+        raise HTTPException(
+            status_code=401,
+            detail="employee_id is required (query or X-Employee-Id header).",
+        )
+    return resolved
+
+
+def _is_file_authorized(user_tier: int, required_access_code: int) -> bool:
+    return user_tier == 1 or required_access_code == 2
+
+
+def _fetch_github_contents_json(repo_path: str) -> Dict[str, Any]:
+    _validate_github_config()
+    url = f"{GITHUB_API_BASE}/repos/{GITHUB_REPO}/contents/{repo_path.lstrip('/')}"
+    try:
+        response = requests.get(url, headers=_github_headers(), timeout=20)
+    except requests.RequestException as exc:
+        raise HTTPException(status_code=502, detail=f"GitHub API request failed: {exc}") from exc
+
+    if response.status_code == 404:
+        raise HTTPException(status_code=404, detail="Policy metadata not found.")
+    if response.status_code >= 400:
+        raise HTTPException(
+            status_code=502,
+            detail=f"GitHub API error ({response.status_code}) while reading metadata.",
+        )
+
+    payload = response.json()
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=500, detail="Unexpected GitHub response shape.")
+    return payload
+
+
+def _fetch_github_text_file(repo_path: str) -> str:
+    metadata = _fetch_github_contents_json(repo_path)
+    encoded = metadata.get("content")
+    if not isinstance(encoded, str):
+        raise HTTPException(status_code=500, detail="Manifest content is missing.")
+    try:
+        decoded = base64.b64decode(encoded)
+        return decoded.decode("utf-8")
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Invalid manifest encoding: {exc}") from exc
+
+
+def _coerce_access_code(raw_value: Any) -> int:
+    try:
+        value = int(raw_value)
+    except Exception:
+        value = 2
+    return 1 if value == 1 else 2
+
+
+def _load_policy_manifest() -> Dict[str, Dict[str, Any]]:
+    raw_text = _fetch_github_text_file(GITHUB_POLICY_MANIFEST_PATH)
+    try:
+        payload = json.loads(raw_text)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=500, detail=f"Invalid policy manifest JSON: {exc}") from exc
+
+    entries: List[Dict[str, Any]] = []
+    if isinstance(payload, dict) and isinstance(payload.get("files"), list):
+        entries = [item for item in payload.get("files", []) if isinstance(item, dict)]
+    elif isinstance(payload, list):
+        entries = [item for item in payload if isinstance(item, dict)]
+    else:
+        raise HTTPException(
+            status_code=500,
+            detail="Policy manifest must be a list or an object with a 'files' list.",
+        )
+
+    index: Dict[str, Dict[str, Any]] = {}
+    for item in entries:
+        path_value = str(item.get("path") or "").strip().replace("\\", "/")
+        name_value = str(item.get("name") or "").strip()
+        if not path_value or not name_value:
+            continue
+
+        record = {
+            "name": name_value,
+            "path": path_value,
+            "access_code": _coerce_access_code(item.get("access_code", 2)),
+            "media_type": str(item.get("media_type") or "application/pdf").strip(),
+        }
+
+        index[_normalize_policy_key(name_value)] = record
+        index[_normalize_policy_key(path_value)] = record
+
+    return index
+
+
+def _resolve_policy_record(file_name: str) -> Dict[str, Any]:
+    normalized_key = _normalize_policy_key(_sanitize_policy_request_path(file_name))
+    manifest_index = _load_policy_manifest()
+    record = manifest_index.get(normalized_key)
+    if not record:
+        raise HTTPException(status_code=404, detail="Policy file not found in access manifest.")
+    return record
+
+
+def _stream_github_file(repo_path: str) -> requests.Response:
+    _validate_github_config()
+    url = f"{GITHUB_API_BASE}/repos/{GITHUB_REPO}/contents/{repo_path.lstrip('/')}"
+    try:
+        response = requests.get(
+            url,
+            headers=_github_headers(accept="application/vnd.github.raw"),
+            stream=True,
+            timeout=30,
+        )
+    except requests.RequestException as exc:
+        raise HTTPException(status_code=502, detail=f"GitHub file download failed: {exc}") from exc
+
+    if response.status_code == 404:
+        response.close()
+        raise HTTPException(status_code=404, detail="Policy file not found in repository.")
+    if response.status_code >= 400:
+        response.close()
+        raise HTTPException(
+            status_code=502,
+            detail=f"GitHub file download error ({response.status_code}).",
+        )
+    return response
 
 
 # ── Neo4j session-memory transaction functions ────────────────────────────────
@@ -1400,6 +1577,90 @@ def get_session_messages(
         raise HTTPException(
             status_code=503, detail=f"Neo4j unavailable: {exc}"
         ) from exc
+
+
+@app.get("/api/v1/policies", response_model=List[PolicyRepositoryItem])
+def list_policy_repository(
+    employee_id: str | None = Query(default=None),
+    x_employee_id: str | None = Header(default=None, alias="X-Employee-Id"),
+) -> List[PolicyRepositoryItem]:
+    """Return policy files visible to the caller's tier based on manifest access_code."""
+
+    resolved_employee_id = _extract_employee_id(employee_id, x_employee_id)
+    user_tier = get_user_tier(resolved_employee_id)
+
+    manifest = _load_policy_manifest()
+    unique_records: Dict[str, Dict[str, Any]] = {}
+    for item in manifest.values():
+        path_key = _normalize_policy_key(str(item.get("path") or ""))
+        if path_key and path_key not in unique_records:
+            unique_records[path_key] = item
+
+    visible_items: List[PolicyRepositoryItem] = []
+    for item in unique_records.values():
+        access_code = _coerce_access_code(item.get("access_code", 2))
+        if not _is_file_authorized(user_tier, access_code):
+            continue
+
+        media_type = str(item.get("media_type") or "application/pdf").lower()
+        name_value = str(item.get("name") or "").strip()
+        if media_type != "application/pdf" and not name_value.lower().endswith(".pdf"):
+            continue
+
+        visible_items.append(
+            PolicyRepositoryItem(
+                file_name=name_value,
+                access_code=access_code,
+            )
+        )
+
+    visible_items.sort(key=lambda item: item.file_name.lower())
+    return visible_items
+
+
+@app.get("/api/v1/policies/view/{file_name:path}")
+def view_policy_pdf(
+    file_name: str,
+    employee_id: str | None = Query(default=None),
+    x_employee_id: str | None = Header(default=None, alias="X-Employee-Id"),
+):
+    """Securely proxy a private GitHub policy PDF without exposing repository URLs."""
+
+    resolved_employee_id = _extract_employee_id(employee_id, x_employee_id)
+    user_tier = get_user_tier(resolved_employee_id)
+
+    policy_record = _resolve_policy_record(file_name)
+    required_access_code = _coerce_access_code(policy_record.get("access_code", 2))
+
+    if not _is_file_authorized(user_tier, required_access_code):
+        raise HTTPException(
+            status_code=403,
+            detail="Access denied for this policy document.",
+        )
+
+    media_type = str(policy_record.get("media_type") or "application/pdf").lower()
+    policy_name = str(policy_record.get("name") or file_name)
+    policy_path = str(policy_record.get("path") or "").strip()
+
+    if media_type != "application/pdf" and not policy_name.lower().endswith(".pdf"):
+        raise HTTPException(status_code=415, detail="Only PDF files are supported by this endpoint.")
+
+    github_response = _stream_github_file(policy_path)
+
+    def _iter_bytes():
+        try:
+            yield from github_response.iter_content(chunk_size=1024 * 64)
+        finally:
+            github_response.close()
+
+    return StreamingResponse(
+        _iter_bytes(),
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f'inline; filename="{policy_name}"',
+            "Cache-Control": "no-store",
+        },
+    )
 
 
 @app.post("/enhance", response_model=EnhanceResponse)
