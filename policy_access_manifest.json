@@ -1,0 +1,137 @@
+{
+  "files": [
+    {
+      "name": "Corporate_LC_Limits_2024.pdf",
+      "path": "pdfs/Corporate_LC_Limits_2024.pdf",
+      "access_code": 2,
+      "media_type": "application/pdf"
+    },
+    {
+      "name": "Credit_Card_Lounge_Access_2024.pdf",
+      "path": "pdfs/Credit_Card_Lounge_Access_2024.pdf",
+      "access_code": 2,
+      "media_type": "application/pdf"
+    },
+    {
+      "name": "Credit_Card_Lounge_Access_2025.pdf",
+      "path": "pdfs/Credit_Card_Lounge_Access_2025.pdf",
+      "access_code": 2,
+      "media_type": "application/pdf"
+    },
+    {
+      "name": "Credit_Card_Lounge_Access_2026.pdf",
+      "path": "pdfs/Credit_Card_Lounge_Access_2026.pdf",
+      "access_code": 2,
+      "media_type": "application/pdf"
+    },
+    {
+      "name": "Digital_Banking_Security_Guidelines_2026.pdf",
+      "path": "pdfs/Digital_Banking_Security_Guidelines_2026.pdf",
+      "access_code": 2,
+      "media_type": "application/pdf"
+    },
+    {
+      "name": "FD_Interest_Rates_2026.pdf",
+      "path": "pdfs/FD_Interest_Rates_2026.pdf",
+      "access_code": 2,
+      "media_type": "application/pdf"
+    },
+    {
+      "name": "KYC_AML_PAN_Baseline_2024.pdf",
+      "path": "pdfs/KYC_AML_PAN_Baseline_2024.pdf",
+      "access_code": 2,
+      "media_type": "application/pdf"
+    },
+    {
+      "name": "NRI_Account_Opening_SOP_2026.pdf",
+      "path": "pdfs/NRI_Account_Opening_SOP_2026.pdf",
+      "access_code": 2,
+      "media_type": "application/pdf"
+    },
+    {
+      "name": "NRI_Business_Loan_2026.pdf",
+      "path": "pdfs/NRI_Business_Loan_2026.pdf",
+      "access_code": 2,
+      "media_type": "application/pdf"
+    },
+    {
+      "name": "Retail_Deposit_Policy_2026.pdf",
+      "path": "pdfs/Retail_Deposit_Policy_2026.pdf",
+      "access_code": 2,
+      "media_type": "application/pdf"
+    },
+    {
+      "name": "Retail_NRI_Home_Loan_2024.pdf",
+      "path": "pdfs/Retail_NRI_Home_Loan_2024.pdf",
+      "access_code": 2,
+      "media_type": "application/pdf"
+    },
+    {
+      "name": "Staff_Announcement_ESG_Rebates.png",
+      "path": "images/Staff_Announcement_ESG_Rebates.png",
+      "access_code": 2,
+      "media_type": "image/png"
+    },
+    {
+      "name": "Sustainable_Finance_ESG_Framework.pdf",
+      "path": "pdfs/Sustainable_Finance_ESG_Framework.pdf",
+      "access_code": 2,
+      "media_type": "application/pdf"
+    },
+    {
+      "name": "Tax_Compliance_TDS_2024.pdf",
+      "path": "pdfs/Tax_Compliance_TDS_2024.pdf",
+      "access_code": 2,
+      "media_type": "application/pdf"
+    },
+
+    {
+      "name": "Anti_Money_Laundering_SAR_Case_9901.pdf",
+      "path": "pdfs/Anti_Money_Laundering_SAR_Case_9901.pdf",
+      "access_code": 1,
+      "media_type": "application/pdf"
+    },
+    {
+      "name": "Executive_Liquidity_Risk_Thresholds_2026.pdf",
+      "path": "pdfs/Executive_Liquidity_Risk_Thresholds_2026.pdf",
+      "access_code": 1,
+      "media_type": "application/pdf"
+    },
+    {
+      "name": "Internal_Audit_Redlines_Q1_2026.pdf",
+      "path": "pdfs/Internal_Audit_Redlines_Q1_2026.pdf",
+      "access_code": 1,
+      "media_type": "application/pdf"
+    },
+    {
+      "name": "Internal_Escalation_MCO88_Audit.png",
+      "path": "images/Internal_Escalation_MCO88_Audit.png",
+      "access_code": 1,
+      "media_type": "image/png"
+    },
+    {
+      "name": "Project_Titan_Acquisition_Due_Diligence.pdf",
+      "path": "pdfs/Project_Titan_Acquisition_Due_Diligence.pdf",
+      "access_code": 1,
+      "media_type": "application/pdf"
+    },
+    {
+      "name": "Security_Alert_MFA_Bypass_Attempt.png",
+      "path": "images/Security_Alert_MFA_Bypass_Attempt.png",
+      "access_code": 1,
+      "media_type": "image/png"
+    },
+    {
+      "name": "Sentinel_Security_Root_Key_Management.pdf",
+      "path": "pdfs/Sentinel_Security_Root_Key_Management.pdf",
+      "access_code": 1,
+      "media_type": "application/pdf"
+    },
+    {
+      "name": "Whistleblower_Report_Unsecured_Lending.pdf",
+      "path": "pdfs/Whistleblower_Report_Unsecured_Lending.pdf",
+      "access_code": 1,
+      "media_type": "application/pdf"
+    }
+  ]
+}
