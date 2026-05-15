@@ -1,4 +1,3 @@
-
 # Sentinel GraphRAG: Enterprise Conversational AI for Banking Compliance
 
 ![Python](https://img.shields.io/badge/Python-3.10%2B-blue)
@@ -33,36 +32,52 @@ Sentinel implements a **three-layer retrieval engine** with governance enforceme
 ## Core Features
 
 ### 🔄 Ingestion Pipeline
+
 - **Multimodal Extraction**: Gemini Vision API parses PDFs/images with **table preservation** (critical for numeric policies)
 - **Pydantic Validation**: Structured `GraphAction` model enforces schema correctness (target_node, action_type, extracted_rule, applies_to_customer, requires_document)
 - **Ontology Guardrails**: Fixed 10-category taxonomy (Retail_Loans, Corporate_Banking, KYC_AML, Tax_Compliance, etc.) prevents hallucinated classifications
 - **Policy Lineage**: :SUPERSEDES edges track version history without hard deletes
 
 ### 🔍 Hybrid Retrieval Engine
+
 - **True Hybrid Search**: Vector + BM25 score fusion for semantic + keyword relevance
 - **GLAC Governance**: Employee tier-based access control (Admin: all policies, Operator: public tier-2 only)
 - **Active Policy Filtering**: Automatically excludes superseded policies from retrieval
 - **Confidence Scoring**: Raw similarity scores normalized to UI-ready percentages (0-98.5%)
 - **Fallback Robustness**: Vector-only retrieval if full-text index unavailable
+- **Interactive Citation Graph**: Click-to-explore evidence relationships (policy → category → customer type → required docs) via force-directed visualization
 
 ### 🌍 Multilingual Support
+
 - **Language Detection**: FastText (primary, 50% confidence threshold) + langdetect fallback
 - **Supported Languages**: English, Hindi, Telugu, Tamil, Spanish, French, German, Portuguese, Arabic, Bengali, Punjabi, Marathi, Kannada, Malayalam, Gujarati, Urdu, Chinese
 - **Response Localization**: LLM response enforced in detected user language
 - **Technical Term Preservation**: Acronyms (TDS, KYC, AML) remain in English for regulatory clarity
 
+### 💼 Executive Auditor Persona (High-Value Exposure Detection) – Stage 3
+
+- **Numeric Grounding**: System prompt instructs the LLM to extract and preserve exact numeric values (TDS rates, liquidity ratios, financial thresholds)
+- **High-Value Risk Flagging**: Regex-based `detect_high_value_exposure()` scans context for INR amounts ≥ ₹10 Crore and flags as **[CRITICAL TIER 1 RISK]**
+- **Automatic Bolding**: Amounts exceeding ₹10 Crore are automatically bold-formatted in responses with source document attribution
+- **Business Value**: Executives and compliance officers immediately identify enterprise-level financial exposures without manual review
+- **Example**: Query about corporate lending limits → Response flags **₹14.5 Crore cap** with policy name → Operator can escalate to risk committee
+
 ### 💬 Conversation & Session Memory
+
 - **Neo4j Session Persistence**: Last 4 chat messages injected for conversation continuity
 - **Audit Trail**: Every turn saved with user_tier, retrieval_tier, citations, sentinel_reasoning
 - **Citations with Confidence**: Evidence snapshot includes document name, category, customer types, required docs
 - **Deterministic Replay**: Session history replayable for compliance audits
 
 ### 🚀 Enterprise Features
+
 - **Microservice Architecture**: Embeddings offloaded to HF Spaces (no local GGUF models)
 - **Graceful Degradation**: FastText unavailable → langdetect → English; embedding service down → 503 error (no silent fallback)
 - **Time-Budgeted Features**: Follow-up suggestions respect 2.5-second timeout with ThreadPoolExecutor
 - **Lazy Singletons**: LLM, embeddings, driver initialized on first request (no startup coupling)
 - **Comprehensive Logging**: All errors, warnings, and fallback events logged to console
+- **Secure Asset Proxy**: Private GitHub policy vault with GLAC-enforced read access
+- **Policy Repository Tab**: Browsable UI for policy discovery and filtered access
 
 ## System Architecture
 
@@ -134,7 +149,6 @@ Policy (name, embedding, extracted_rule, active, access_code, issue_date)
     └─ :SUPERSEDES → [old_policy] (version lineage, marks old as inactive)
 ```
 
-
 ## Repository Structure
 
 ```
@@ -171,14 +185,14 @@ sentinel-graphrag/
 
 ### Key Files Explained
 
-| File | Purpose | Key Functions |
-|------|---------|---|
-| **api.py** | FastAPI control plane | `chat()`, `ingest_document()`, `/sessions`, `/enhance` |
-| **query_copilot.py** | Retrieval core | `retrieve_active_policy()`, `detect_user_language()`, `generate_answer()` |
-| **init_graph.py** | Neo4j setup | `initialize_ontology()`, `create_policy_vector_index()`, `process_and_ingest()` |
-| **app.py** | Streamlit UI | Session management, document upload, policy exploration |
-| **seed_database.py** | Baseline ingestion | Automated baseline policy seeding via Gemini + Pydantic |
-| **connect.py** | Neo4j factory | `build_neo4j_driver()` (connection management) |
+| File                       | Purpose               | Key Functions                                                                         |
+| -------------------------- | --------------------- | ------------------------------------------------------------------------------------- |
+| **api.py**           | FastAPI control plane | `chat()`, `ingest_document()`, `/sessions`, `/enhance`                        |
+| **query_copilot.py** | Retrieval core        | `retrieve_active_policy()`, `detect_user_language()`, `generate_answer()`       |
+| **init_graph.py**    | Neo4j setup           | `initialize_ontology()`, `create_policy_vector_index()`, `process_and_ingest()` |
+| **app.py**           | Streamlit UI          | Session management, document upload, policy exploration                               |
+| **seed_database.py** | Baseline ingestion    | Automated baseline policy seeding via Gemini + Pydantic                               |
+| **connect.py**       | Neo4j factory         | `build_neo4j_driver()` (connection management)                                      |
 
 ## Quickstart
 
@@ -203,16 +217,19 @@ python -m venv venv
 **Activate virtual environment:**
 
 **Windows (PowerShell):**
+
 ```powershell
 venv\Scripts\Activate.ps1
 ```
 
 **macOS/Linux:**
+
 ```bash
 source venv/bin/activate
 ```
 
 **Install dependencies:**
+
 ```bash
 pip install -r requirements.txt
 ```
@@ -245,6 +262,14 @@ HF_API_TOKEN=your_huggingface_api_token
 # Optional: Similarity Filtering via HF
 HF_SIMILARITY_ENDPOINT=https://your-similarity-space.hf.space/run/predict
 
+# GitHub Document Vault (Stage 3: Secure Asset Proxy)
+GITHUB_REPO=mohan120105/JatayuS5-TuringMachines
+GITHUB_POLICY_MANIFEST_REPO=mohan120105/JatayuS5-TuringMachines
+GITHUB_POLICY_CONTENTS_REPO=mohan120105/JatayuS5-TuringMachines
+GITHUB_TOKEN=your_github_pat_token
+GITHUB_DOCS_ROOT=hackathon-docs
+GITHUB_POLICY_MANIFEST_PATH=policy_access_manifest.json
+
 # Feature Flags
 ENABLE_FOLLOWUP_SUGGESTIONS=true
 
@@ -261,6 +286,7 @@ python init_graph.py
 ```
 
 This creates:
+
 - 10 Policy Category nodes (fixed ontology)
 - Vector index (cosine similarity, 384-dim)
 - Full-text index (BM25 on name, rule, source_text)
@@ -282,7 +308,7 @@ Automatically ingests all PDFs/PNGs from `v1_baseline_docs/` via Gemini extracti
 python -m uvicorn api:app --host 0.0.0.0 --port 8000 --reload
 ```
 
-API available at: `http://localhost:8000`  
+API available at: `http://localhost:8000`
 Interactive docs: `http://localhost:8000/docs`
 
 **Option B: Streamlit UI (Development)**
@@ -312,6 +338,7 @@ Tests multilingual support (English, Hindi, Telugu, Spanish, etc.).
 ## API Endpoints
 
 ### Chat Endpoint
+
 ```http
 POST /chat
 Content-Type: application/json
@@ -340,13 +367,14 @@ Response:
 ```
 
 ### Ingest Document Endpoint
+
 ```http
 POST /ingest
 Content-Type: multipart/form-data
 
 file: <PDF or image>
 employee_id: 1234
-access_code: 2  # 1=Admin, 2=Public
+access_code: 2  # 1=Admin-only, 2=Public (visible to all tiers)
 
 Response:
 {
@@ -357,12 +385,14 @@ Response:
 ```
 
 ### Session Management
+
 ```http
 GET /sessions?employee_id=1234
 GET /sessions/{session_id}/messages?employee_id=1234
 ```
 
 ### Prompt Enhancement (Optional)
+
 ```http
 POST /enhance
 Content-Type: application/json
@@ -374,6 +404,73 @@ Content-Type: application/json
 Response:
 {
   "enhanced_prompt": "What documents are required for NRI customers?"
+}
+```
+
+### Policy Repository (GitHub Vault Proxy) – Stage 3
+
+Retrieves policies from a private GitHub repository with tier-based GLAC access control.
+
+**List Available Policies:**
+
+```http
+GET /api/v1/policies?employee_id=1234
+Authorization: Bearer {token_if_needed}
+
+Response:
+[
+  {
+    "name": "Retail_Loans_2026",
+    "category": "Retail_Loans",
+    "access_code": 2,
+    "url": "/api/v1/policies/view/Retail_Loans_2026.md"
+  },
+  {
+    "name": "Corporate_Banking_Policy",
+    "category": "Corporate_Banking",
+    "access_code": 1,
+    "url": "/api/v1/policies/view/Corporate_Banking_Policy.md"
+  }
+]
+```
+
+**Note:** Only policies accessible by the user's tier are returned.
+- Tier 1 (Admin, prefix `1***`): sees all policies (access_code = 1 or 2)
+- Tier 2–3 (Operator/Viewer, prefix `2***` or `3***`): sees public policies only (access_code = 2)
+
+**View Policy File:**
+
+```http
+GET /api/v1/policies/view/Retail_Loans_2026.md?employee_id=1234
+
+Response: (File content with GLAC filtering applied)
+200 OK – File content returned
+403 Forbidden – User tier insufficient for requested policy
+404 Not Found – Policy not in vault
+```
+
+**Why This Matters (Secure Asset Proxy Pattern):**
+- **Private Policy Storage**: Policies live in a private GitHub repository (immutable, audit-ready, version-controlled)
+- **Zero-Trust Retrieval**: Every `/api/v1/policies/view` call validates user tier + access_code before returning content
+- **Deterministic Lineage**: Policy version control via Git history; no local corruption risk
+- **End-to-End Governance**: Integrates seamlessly with Sentinel's retrieval engine for hybrid graph + vault queries
+
+**Environment Setup:**
+
+```bash
+# Generate GitHub PAT (Personal Access Token) with read:repo permission
+# https://github.com/settings/tokens
+
+# Set in .env:
+GITHUB_REPO=mohan120105/JatayuS5-TuringMachines
+GITHUB_TOKEN=ghp_xxxxxxxxxxxx
+
+# Create policy_access_manifest.json in your repo root:
+{
+  "policies": [
+    {"name": "Retail_Loans_2026.md", "access_code": 2},
+    {"name": "Corporate_Banking_Policy.md", "access_code": 1}
+  ]
 }
 ```
 
@@ -395,10 +492,14 @@ Enforces employee tier-based policy visibility:
 
 ```cypher
 WHERE ($user_tier = 1 OR p.access_code = 2)
--- Tier 1 (Admin): sees all policies
--- Tier 2 (Operator): sees public tier-2 policies only
--- Tier 3 (Viewer): sees public tier-2 policies only
+-- Tier 1 (Admin, prefix 1***): sees all policies (access_code = 1 or 2)
+-- Tier 2 (Operator, prefix 2***): sees public policies only (access_code = 2)
+-- Tier 3 (Viewer, prefix 3***): sees public policies only (access_code = 2)
 ```
+
+**Access Code Meanings:**
+- `access_code = 1`: Admin-only (restricted to Tier 1 users only)
+- `access_code = 2`: Public (visible to all employee tiers)
 
 ### Multi-Hop Relationship Resolution
 
@@ -414,6 +515,7 @@ RETURN collect(DISTINCT ct.name) AS customer_types,
 ## Usage Examples
 
 ### Example 1: Banking Policy Query (English)
+
 ```
 User: "What is the TDS rate on salary deposits?"
 
@@ -427,6 +529,7 @@ System:
 ```
 
 ### Example 2: Multilingual Query (Hindi)
+
 ```
 User: "NRI ग्राहकों के लिए आवश्यक दस्तावेज़ कौन से हैं?"
 
@@ -440,6 +543,7 @@ System:
 ```
 
 ### Example 3: Partial Match (Retrieval Tier Classification)
+
 ```
 User: "What is the audit frequency for corporate accounts?"
 
@@ -455,18 +559,31 @@ System:
 
 ## Performance Characteristics
 
-| Component | Latency | Notes |
-|-----------|---------|-------|
-| Language Detection | 10-50ms | FastText or langdetect lookup |
-| Query Embedding | 100-500ms | HF Spaces network latency |
-| Hybrid Retrieval | 50-200ms | Neo4j vector + text index + relationship traversal |
-| LLM Generation | 2-10s | Groq Llama-3.3-70b inference |
-| Session History Fetch | 10-50ms | Neo4j last 4 messages query |
-| **Total E2E (cached)** | **3-12s** | Dominated by LLM inference |
+| Component                    | Latency         | Notes                                              |
+| ---------------------------- | --------------- | -------------------------------------------------- |
+| Language Detection           | 10-50ms         | FastText or langdetect lookup                      |
+| Query Embedding              | 100-500ms       | HF Spaces network latency                          |
+| Hybrid Retrieval             | 50-200ms        | Neo4j vector + text index + relationship traversal |
+| LLM Generation               | 2-10s           | Groq Llama-3.3-70b inference                       |
+| Session History Fetch        | 10-50ms         | Neo4j last 4 messages query                        |
+| **Total E2E (cached)** | **3-12s** | Dominated by LLM inference                         |
+
+**Performance SLA Notes:**
+
+- **Query Processing (<1.5s):** Language detection + embedding + retrieval combined, excluding LLM time
+- **Follow-up Suggestion Budget:** 2.5-second hard timeout via ThreadPoolExecutor (gracefully skips if overrun)
+- **Embedding Service Timeout:** 60 seconds default; override via code if HF Spaces is congested
+- **p95/p99 Latency:** Typical p95 = 8-10s (LLM-dominated); p99 = 12-15s under load
+- **SLA Targets:**
+  - `exact_match` retrieval tier: <5s e2e (high confidence retrieval)
+  - `partial_match` retrieval tier: <12s e2e (lower confidence, suggestions included)
+  - `no_match`: <2s (strict no-answer fallback)
+- **Under Peak Load:** Query queuing may extend latency; consider horizontal scaling of Neo4j + API replicas
 
 ## Troubleshooting
 
 ### Neo4j Connection Fails
+
 ```bash
 # Verify Neo4j is running and Bolt is enabled
 neo4j status
@@ -474,12 +591,14 @@ neo4j status
 ```
 
 ### FastText Model Not Found
+
 ```bash
 # Automatically downloads on first language detection
 # Or manually: docs/FASTTEXT_MODEL_INSTRUCTIONS.md
 ```
 
 ### Embedding Space Timeout
+
 ```bash
 # HF_EMBEDDING_SPACE might be overloaded; increase timeout
 # In query_copilot.py: timeout=60 (default)
@@ -487,6 +606,7 @@ neo4j status
 ```
 
 ### Groq Rate Limit (429)
+
 ```bash
 # Groq free tier: ~30 requests/minute
 # Response includes: "Groq API rate limit encountered. Please retry in a few seconds."
@@ -495,12 +615,14 @@ neo4j status
 ## Testing
 
 ### Language Detection Tests
+
 ```bash
 python test_detection.py        # Full test suite
 python test_detection_minimal.py  # Quick demo
 ```
 
 ### Manual Integration Test
+
 ```bash
 # Terminal 1: Start API
 python -m uvicorn api:app --reload
@@ -547,12 +669,12 @@ This project is provided as-is for research and enterprise deployment.
 ## Support & Questions
 
 For issues, questions, or suggestions:
+
 - Open an **Issue** on GitHub
 - Check **SYSTEM_AUDIT.md** for technical deep-dives
 - Review **test files** for usage examples
 
 ---
 
-**Sentinel GraphRAG** — Enterprise Hybrid Retrieval for Banking Compliance  
+**Sentinel GraphRAG** — Enterprise Hybrid Retrieval for Banking Compliance
 *Built for accuracy, auditability, and regulatory resilience.*
-
